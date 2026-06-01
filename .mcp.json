@@ -1,0 +1,21 @@
+{
+  "mcpServers": {
+    "feishu": {
+      "command": "lark-mcp",
+      "args": [
+        "mcp",
+        "-a", "cli_aa97347bb5f9dbd7",
+        "-s", "UnGjpZgesVm4e0OKKkX5AEARIKiji4RC",
+        "--token-mode", "tenant_access_token",
+        "-l", "zh"
+      ]
+    },
+    "douyin": {
+      "command": "uvx",
+      "args": ["douyin-mcp-server"],
+      "env": {
+        "PATH": "C:\\Users\\15769\\AppData\\Local\\Microsoft\\WinGet\\Packages\\Gyan.FFmpeg_Microsoft.Winget.Source_8wekyb3d8bbwe\\ffmpeg-8.1.1-full_build\\bin;%PATH%"
+      }
+    }
+  }
+}
