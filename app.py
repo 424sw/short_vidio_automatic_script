@@ -457,4 +457,20 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    import os, sys, subprocess
+    # 当被 python3 直接调用时（如 ModelScope 创空间），自动启动 Streamlit 服务器
+    # 如果已在 Streamlit 环境中运行，则执行 main()
+    try:
+        from streamlit.runtime.scriptrunner import get_script_run_ctx
+        ctx = get_script_run_ctx()
+        if ctx is not None:
+            main()
+        else:
+            raise RuntimeError("Not in Streamlit context")
+    except Exception:
+        port = int(os.environ.get("PORT", 8501))
+        print(f"Launching Streamlit on port {port}...")
+        subprocess.run([sys.executable, "-m", "streamlit", "run", __file__,
+                        "--server.port", str(port),
+                        "--server.address", "0.0.0.0",
+                        "--server.headless", "true"])
