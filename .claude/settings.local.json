@@ -1,5 +1,22 @@
 {
+  "permissions": {
+    "allow": [
+      "mcp__feishu__wiki_v2_space_getNode",
+      "mcp__feishu__docx_v1_document_rawContent",
+      "mcp__feishu__docx_builtin_import",
+      "WebSearch",
+      "WebFetch(domain:www.yupao.com)",
+      "Bash(mkdir -p data output)",
+      "Bash(mv video_info.json video_synthesis.json frame_analysis.json data/)",
+      "Bash(mv scripts_v3.json generated_scripts.json output/)",
+      "Bash(mv blocks_*.json copy_blocks_*.json template_blocks_mix.json data/)",
+      "Bash(rm -f test_video.mp4 audio.wav generated_scripts_raw.txt)",
+      "Bash(git add *)",
+      "Bash(git commit *)"
+    ]
+  },
   "enabledMcpjsonServers": [
-    "feishu"
+    "feishu",
+    "douyin"
   ]
 }

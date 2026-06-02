@@ -1,0 +1,19 @@
+# Temp files
+test_video.mp4
+audio.wav
+frames/
+*.pyc
+__pycache__/
+
+# Sensitive state (tokens)
+api_state.json
+
+# Generated output (temporary)
+output/
+*.md
+!CLAUDE.md
+!README.md
+
+# OS
+.DS_Store
+Thumbs.db
