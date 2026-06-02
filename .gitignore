@@ -1,25 +1,24 @@
-# Downloaded videos (large files)
-test_video.mp4
-audio.wav
-frames/
-data/downloads/
-data/frames/
+# Streamlit secrets (never commit)
+.streamlit/secrets.toml
 
 # Python cache
-*.pyc
 __pycache__/
+*.pyc
+*.pyo
+
+# Runtime data (generated at runtime, not source code)
+data/downloads/
+data/frames/
+data/*.mp4
+data/*.wav
+data/*.jpg
+data/*.png
+data/*.json
+
+# OS files
 .DS_Store
 Thumbs.db
 
-# Secrets (never commit)
-.streamlit/secrets.toml
-
-# Temporary data dumps (keep production data)
-data/copy_blocks_*.json
-data/test_*.jpg
-data/table_dump*.txt
-data/oral_dialog_*.txt
-data/oral_dialog_*.json
-data/oral_highlight_payload.json
-data/verification_report.txt
-data/template_blocks_mix.json
+# IDE
+.vscode/
+.idea/

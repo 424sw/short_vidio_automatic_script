@@ -9,7 +9,7 @@ from openai import OpenAI
 
 from config import (
     AGNES_BASE_URL, AGNES_API_KEY, AGNES_MODEL,
-    MIX_SCRIPT_PROMPT, ORAL_SCRIPT_PROMPT,
+    build_mix_prompt, build_oral_prompt,
 )
 
 logger = logging.getLogger(__name__)
@@ -34,21 +34,23 @@ class ScriptGenerator:
     # ============================================================
 
     def generate(self, synthesis: str, video_title: str,
-                 script_type: str = "mix") -> dict:
+                 script_type: str = "mix",
+                 custom_requirements: str = "") -> dict:
         """生成脚本.
 
         Args:
             synthesis: AI 视频综合分析文本
             video_title: 原视频标题
             script_type: "mix" 或 "oral"
+            custom_requirements: 用户自定义要求（大白话），优先级高于默认规则
 
         Returns:
             parsed script dict
         """
         if script_type == "mix":
-            prompt = MIX_SCRIPT_PROMPT.format(synthesis=synthesis)
+            prompt = build_mix_prompt(synthesis, custom_requirements)
         else:
-            prompt = ORAL_SCRIPT_PROMPT.format(synthesis=synthesis)
+            prompt = build_oral_prompt(synthesis, custom_requirements)
 
         logger.info(f"生成{script_type}脚本...")
 

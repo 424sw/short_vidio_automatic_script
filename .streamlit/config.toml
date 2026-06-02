@@ -1,0 +1,3 @@
+[client]
+# 隐藏右上角的 Deploy / Stop / 工具栏
+toolbarMode = "viewer"
