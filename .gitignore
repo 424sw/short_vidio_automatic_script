@@ -2,12 +2,17 @@
 test_video.mp4
 audio.wav
 frames/
+data/downloads/
+data/frames/
 
 # Python cache
 *.pyc
 __pycache__/
 .DS_Store
 Thumbs.db
+
+# Secrets (never commit)
+.streamlit/secrets.toml
 
 # Temporary data dumps (keep production data)
 data/copy_blocks_*.json

@@ -18,7 +18,16 @@
       "Bash(python fill_mix_rows.py)",
       "Read(//c/Users/15769/**)",
       "Bash(export PYTHONIOENCODING=utf-8)",
-      "Bash(cd c:/Users/15769/Desktop/short_vidio_automatic_script && rm -f data/copy_blocks_*.json data/oral_dialog_block.json data/oral_dialog_content.txt data/oral_dialog_raw.txt data/oral_highlight_payload.json data/table_dump.txt data/table_dump_oral.txt data/template_blocks_mix.json data/test_image.jpg data/verification_report.txt output/generated_scripts.json fill_mix_rows.py && echo \"Deleted temp files\" && find . -type f -not -path './.git/*' -not -path './.claude/*' | sort)"
+      "Bash(cd c:/Users/15769/Desktop/short_vidio_automatic_script && rm -f data/copy_blocks_*.json data/oral_dialog_block.json data/oral_dialog_content.txt data/oral_dialog_raw.txt data/oral_highlight_payload.json data/table_dump.txt data/table_dump_oral.txt data/template_blocks_mix.json data/test_image.jpg data/verification_report.txt output/generated_scripts.json fill_mix_rows.py && echo \"Deleted temp files\" && find . -type f -not -path './.git/*' -not -path './.claude/*' | sort)",
+      "Bash(git config *)",
+      "Bash(git --version)",
+      "Bash(pip install *)",
+      "Bash(pip show *)",
+      "Bash(python -m pip install streamlit openai requests --quiet)",
+      "Bash(python -c \"print\\('python works'\\)\")",
+      "Bash(python -c \"import streamlit; print\\('streamlit:', streamlit.__version__\\)\")",
+      "Bash(/d/08-python/python -m pip install streamlit openai requests)",
+      "Bash(pip --version)"
     ],
     "additionalDirectories": [
       "c:\\Users\\15769\\Desktop\\short_vidio_automatic_script\\data",
