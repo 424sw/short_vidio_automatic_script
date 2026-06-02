@@ -65,7 +65,15 @@ def get_ffmpeg_path() -> str:
     known_windows = r"C:\Users\15769\AppData\Local\Microsoft\WinGet\Packages\Gyan.FFmpeg_Microsoft.Winget.Source_8wekyb3d8bbwe\ffmpeg-8.1.1-full_build\bin\ffmpeg.exe"
     if os.path.exists(known_windows):
         return known_windows
-    # 3. 默认回退
+    # 3. 尝试 imageio-ffmpeg 内置的静态 ffmpeg（跨平台，部署环境首选）
+    try:
+        import imageio_ffmpeg
+        exe = imageio_ffmpeg.get_ffmpeg_exe()
+        if exe and os.path.exists(exe):
+            return exe
+    except Exception:
+        pass
+    # 4. 默认回退
     return "ffmpeg"
 
 
