@@ -12,7 +12,17 @@
       "Bash(mv blocks_*.json copy_blocks_*.json template_blocks_mix.json data/)",
       "Bash(rm -f test_video.mp4 audio.wav generated_scripts_raw.txt)",
       "Bash(git add *)",
-      "Bash(git commit *)"
+      "Bash(git commit *)",
+      "Bash(curl -s \"https://open.feishu.cn/open-apis/docx/v1/documents/XBBvd2remoSevkxdYjRcDN06n1b/blocks?page_size=500\" -H \"Authorization: Bearer t-g10462djDTPAUZA3PMRAN3BFSP7TY2VJYL5HRRVV\" > c:/Users/15769/Desktop/short_vidio_automatic_script/data/copy_blocks_口播副本.json)",
+      "Bash(python -c ' *)",
+      "Bash(python fill_mix_rows.py)",
+      "Read(//c/Users/15769/**)",
+      "Bash(export PYTHONIOENCODING=utf-8)",
+      "Bash(cd c:/Users/15769/Desktop/short_vidio_automatic_script && rm -f data/copy_blocks_*.json data/oral_dialog_block.json data/oral_dialog_content.txt data/oral_dialog_raw.txt data/oral_highlight_payload.json data/table_dump.txt data/table_dump_oral.txt data/template_blocks_mix.json data/test_image.jpg data/verification_report.txt output/generated_scripts.json fill_mix_rows.py && echo \"Deleted temp files\" && find . -type f -not -path './.git/*' -not -path './.claude/*' | sort)"
+    ],
+    "additionalDirectories": [
+      "c:\\Users\\15769\\Desktop\\short_vidio_automatic_script\\data",
+      "C:\\Users\\15769\\Desktop\\short_vidio_automatic_script\\data"
     ]
   },
   "enabledMcpjsonServers": [
