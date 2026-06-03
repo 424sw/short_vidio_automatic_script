@@ -17,6 +17,7 @@ from openai import OpenAI
 from config import (
     QUALITY_PRESETS, get_quality_config, generate_doc_title,
     AGNES_BASE_URL, AGNES_API_KEY, AGNES_MODEL, ADMIN_PASSWORD,
+    save_admin_credentials, ADMIN_RECOVERY_KEY,
 )
 from src.douyin_extractor import DouyinExtractor, DouyinError
 from src.video_analyzer import VideoAnalyzer, VideoAnalysisError
@@ -53,6 +54,23 @@ logging.basicConfig(
     handlers=[logging.StreamHandler(sys.stdout)],
 )
 logger = logging.getLogger("app")
+
+
+# ============================================================
+# 缓存资源（避免每次 rerun 都重新创建）
+# ============================================================
+
+@st.cache_resource
+def _get_ai_client():
+    """缓存的 AI 客户端（跨 rerun 复用）"""
+    return OpenAI(base_url=AGNES_BASE_URL, api_key=AGNES_API_KEY)
+
+
+@st.cache_resource
+def _get_feishu_client():
+    """缓存的飞书客户端（跨 rerun 复用）"""
+    return FeishuClient()
+
 
 # ============================================================
 # Session State
@@ -138,6 +156,7 @@ def register_docs(doc_ids: list, doc_urls: list):
 
 
 def delete_expired_docs():
+    """删除过期文档。网络错误静默忽略，不阻塞启动。"""
     registry = _load_doc_registry()
     if not registry:
         return
@@ -146,16 +165,20 @@ def delete_expired_docs():
     if not expired:
         return
     try:
-        client = FeishuClient()
+        client = _get_feishu_client()
     except Exception:
         return
+    deleted = 0
     for doc_id in expired:
         try:
             if client.delete_document(doc_id):
                 del registry[doc_id]
+                deleted += 1
         except Exception:
-            pass
-    _save_doc_registry(registry)
+            pass  # 单个文档删除失败不影响其他
+    if deleted:
+        _save_doc_registry(registry)
+        logger.info(f"已清理 {deleted} 个过期文档")
 
 
 # ============================================================
@@ -255,7 +278,10 @@ def render_input_panel():
 
 def render_progress_panel():
     step = st.session_state.step
-    step_labels = {1: "提取视频", 2: "分析视频", 3: "生成脚本", 4: "创建飞书文档"}
+    step_labels = {1: "提取视频", 2: "AI 分析视频", 3: "生成脚本", 4: "创建飞书文档"}
+
+    # 各步骤预计时间
+    step_times = {1: "约 10-30 秒", 2: "约 1-5 分钟", 3: "约 10-30 秒", 4: "约 5-15 秒"}
 
     elapsed = time.time() - st.session_state.elapsed_start
     e_str = f"{int(elapsed // 60)} 分 {int(elapsed % 60)} 秒" if elapsed >= 60 else f"{int(elapsed)} 秒"
@@ -275,7 +301,7 @@ def render_progress_panel():
             第 {step} 步 &middot; {step_labels.get(step, '...')}
         </div>
         <div style="color: #999; font-size: 0.85em;">
-            已用时 {e_str} &nbsp; | &nbsp; 预计 {preset['est_time']}
+            已用时 {e_str} &nbsp; | &nbsp; 本步预计 {step_times.get(step, '')} &nbsp; | &nbsp; 总预计 {preset['est_time']}
         </div>
     </div>
     """, unsafe_allow_html=True)
@@ -299,22 +325,35 @@ def render_result_panel():
     if not script_jsons:
         script_jsons = [st.session_state.script_json] if st.session_state.script_json else []
 
+    # 过滤掉空值
+    doc_urls = [u for u in doc_urls if u]
+    script_jsons = [s for s in script_jsons if s]
+
     if st.session_state.get("doc_ids"):
         st.warning("文档将在 5 分钟后自动删除，请尽快保存副本")
 
-    st.markdown(f"### 已生成 {len(script_jsons)} 个脚本")
+    n = max(len(script_jsons), len(doc_urls))
+    if n == 0:
+        st.error("未生成任何结果。请返回重试。")
+        if st.button("重新开始", use_container_width=True):
+            clear_run()
+            st.rerun()
+        return
 
-    for i, (script, doc_url) in enumerate(zip(script_jsons, doc_urls)):
-        if not doc_url:
-            continue
+    st.markdown(f"### 已生成 {n} 个脚本")
+
+    for i in range(n):
+        doc_url = doc_urls[i] if i < len(doc_urls) else ""
+        script = script_jsons[i] if i < len(script_jsons) else {}
+
         title = script.get("title", f"脚本{i+1}") if script else f"脚本{i+1}"
         label = f"脚本 {i+1}"
 
         st.markdown(f"""
         <div style="border: 1px solid #d0d5dd; border-radius: 8px; padding: 20px; margin: 12px 0;">
-            <p style="font-size: 1em; font-weight: 600; margin: 0 0 8px 0; color: #333;">{label}</p>
+            <p style="font-size: 1em; font-weight: 600; margin: 0 0 8px 0; color: #333;">{label}：{title}</p>
             <a href="{doc_url}" target="_blank" style="font-size: 0.9em; color: #1a56db;
-                word-break: break-all; text-decoration: none;">{doc_url}</a>
+                word-break: break-all; text-decoration: none;">{doc_url if doc_url else '（无链接）'}</a>
         </div>
         """, unsafe_allow_html=True)
 
@@ -412,6 +451,46 @@ def _admin_ask_ai(user_msg: str, current_config: dict) -> dict:
         return {"reply": f"无法解析 AI 返回，请重试。", "config": None}
 
 
+def _admin_ask_ai_with_image(user_msg: str, current_config: dict, image_bytes: bytes, filename: str) -> dict:
+    """带图片的管理员 AI 对话（先用 vision 识别图片内容，再结合文字请求）"""
+    import base64 as _b64
+
+    client = OpenAI(base_url=AGNES_BASE_URL, api_key=AGNES_API_KEY)
+
+    # Step 1: 从图片中提取要求文字
+    ext = filename.rsplit(".", 1)[-1].lower() if "." in filename else "jpeg"
+    if ext == "jpg":
+        ext = "jpeg"
+    b64 = _b64.b64encode(image_bytes).decode("utf-8")
+    b64_uri = f"data:image/{ext};base64,{b64}"
+
+    try:
+        vision_resp = client.chat.completions.create(
+            model=AGNES_MODEL,
+            messages=[{
+                "role": "user",
+                "content": [
+                    {"type": "image_url", "image_url": {"url": b64_uri}},
+                    {"type": "text", "text": "请从这张图片中提取所有的配置修改要求和脚本规则要求。用中文大白话总结输出。如果图片中没有明确要求，回复'无'。"},
+                ],
+            }],
+            max_tokens=800,
+            temperature=0.2,
+            timeout=30,
+        )
+        extracted = vision_resp.choices[0].message.content.strip()
+    except Exception as e:
+        extracted = f"[图片识别失败: {e}]"
+
+    if extracted == "无" or not extracted:
+        combined_msg = user_msg
+    else:
+        combined_msg = f"[从图片识别的要求: {extracted}]\n\n用户消息: {user_msg}" if user_msg else f"[从图片识别的要求: {extracted}]"
+
+    # Step 2: 用合并后的文字请求配置助手
+    return _admin_ask_ai(combined_msg, current_config)
+
+
 def render_admin_panel():
     # 先渲染 sidebar（让退出按钮在侧栏）
     with st.sidebar:
@@ -424,7 +503,51 @@ def render_admin_panel():
         st.caption("修改不会自动同步到 ModelScope 创空间。若需更新线上版本，请 push 代码。")
 
     st.title("配置管理")
-    st.caption("用自然语言修改脚本规则 → AI 翻译 → 确认生效")
+    st.caption("用自然语言修改脚本规则 → AI 翻译 → 确认生效。支持上传图片输入要求。")
+
+    # ---- 可管理内容指示 ----
+    with st.expander("📋 可管理内容指示", expanded=False):
+        cols = st.columns(3)
+        with cols[0]:
+            st.markdown("**📁 模板配置**")
+            st.caption("文件夹Token\n混剪模板ID\n口播模板ID")
+            st.markdown("**🎬 混剪规则**")
+            st.caption("标题字数、行数范围\n文案风格、素材格式\n广告品牌/描述/位置")
+        with cols[1]:
+            st.markdown("**🎤 口播规则**")
+            st.caption("标题字数、对话轮数\n角色格式、情绪选项\n图片素材、对话结构")
+            st.markdown("**📤 交付要求**")
+            st.caption("话题词数量/格式\n【标题】【正文】字段\n【是否发布】【发布类型】")
+        with cols[2]:
+            st.markdown("**📦 产品介绍库**")
+            st.caption("广告后紧跟的产品文案\n可按主题匹配选择")
+            st.markdown("**⚙️ 通用设置**")
+            st.caption("语言、返回格式\n交付要求保护规则")
+
+    # ---- 修改管理密码 ----
+    with st.expander("🔒 修改管理密码", expanded=False):
+        old_pw = st.text_input("当前密码", type="password", key="change_old_pw")
+        new_pw = st.text_input("新密码", type="password", key="change_new_pw")
+        new_pw_confirm = st.text_input("确认新密码", type="password", key="change_new_pw_confirm")
+        if st.button("确认修改密码", type="primary"):
+            if old_pw != ADMIN_PASSWORD:
+                st.error("当前密码错误")
+            elif not new_pw:
+                st.error("新密码不能为空")
+            elif new_pw != new_pw_confirm:
+                st.error("两次输入的新密码不一致")
+            else:
+                # 生成新的恢复密钥（或保留旧的）
+                import secrets
+                new_recovery = secrets.token_hex(6)  # 12位十六进制
+                if save_admin_credentials(new_pw, new_recovery):
+                    st.success(f"密码已修改！请妥善保存新的恢复密钥：")
+                    st.code(new_recovery, language=None)
+                    st.caption("⚠️ 请立即复制保存此恢复密钥。关闭后不可再次查看。")
+                else:
+                    st.error("密码保存失败，请检查文件权限。")
+
+    st.divider()
 
     # 对话历史
     for i, msg in enumerate(st.session_state.admin_msgs):
@@ -458,14 +581,40 @@ def render_admin_panel():
                         msg["content"] += "\n\n已撤销。"
                         st.rerun()
 
-    if prompt := st.chat_input("例如：混剪行数改成 8-12 行、广告品牌改成小红书..."):
-        st.session_state.admin_msgs.append({"role": "user", "content": prompt})
-        with st.spinner("..."):
+    # 图片上传 + 文本输入
+    col_img, col_txt = st.columns([1, 3])
+    with col_img:
+        admin_upload = st.file_uploader(
+            "📷 上传图片（可选）",
+            type=["png", "jpg", "jpeg", "webp"],
+            key="admin_image_uploader",
+            label_visibility="collapsed",
+        )
+    with col_txt:
+        prompt = st.chat_input("例如：混剪行数改成 8-12 行、广告品牌改成小红书...")
+
+    if prompt:  # 仅当用户输入文字时才处理（图片是可选附加）
+        user_msg = prompt
+        display_msg = user_msg
+        if admin_upload:
+            display_msg = f"📷 [{admin_upload.name}] {user_msg}"
+        if admin_upload:
+            user_msg = f"[上传图片: {admin_upload.name}] " + user_msg
+
+        st.session_state.admin_msgs.append({"role": "user", "content": display_msg})
+        with st.spinner("AI 正在理解你的要求..."):
             try:
                 current = json.loads(_ADMIN_REQ_PATH.read_text(encoding="utf-8"))
             except Exception:
                 current = {}
-            result = _admin_ask_ai(prompt, current)
+
+            if admin_upload:
+                # 先用 vision 识别图片内容
+                image_bytes = admin_upload.read()
+                result = _admin_ask_ai_with_image(prompt, current, image_bytes, admin_upload.name)
+            else:
+                result = _admin_ask_ai(prompt, current)
+
         reply = result.get("reply", "")
         new_cfg = result.get("config")
         if new_cfg:
@@ -542,6 +691,14 @@ def step3_generate():
     script_count = st.session_state.get("script_count", 1)
     st.session_state.status_msg = "正在生成脚本..."
 
+    # 边界检查：synthesis 为空时不应到达此步
+    if not synthesis or not synthesis.strip():
+        st.session_state.error = "视频分析结果为空，无法生成脚本。请重试。"
+        st.session_state.step = 0
+        st.session_state.status_msg = ""
+        logger.error("synthesis 为空，跳过脚本生成")
+        return
+
     try:
         gen = ScriptGenerator()
         if script_type == "auto":
@@ -579,22 +736,34 @@ def step4_feishu():
     total = len(scripts)
 
     try:
-        client = FeishuClient()
+        client = _get_feishu_client()
         doc_urls, doc_ids = [], []
+        failed = 0
         for i, script in enumerate(scripts):
+            if script is None:
+                failed += 1
+                continue
             seq = i + 1
             if total > 1:
                 st.session_state.status_msg = f"正在创建飞书文档（{seq}/{total}）..."
             else:
                 st.session_state.status_msg = "正在创建飞书文档..."
 
-            result = client.create_and_fill(
-                st.session_state.script_type, script,
-                st.session_state.video_url, st.session_state.video_title,
-                seq=seq,
-            )
-            doc_urls.append(result["url"])
-            doc_ids.append(result["doc_id"])
+            try:
+                result = client.create_and_fill(
+                    st.session_state.script_type, script,
+                    st.session_state.video_url, st.session_state.video_title,
+                    seq=seq,
+                )
+                doc_urls.append(result["url"])
+                doc_ids.append(result["doc_id"])
+            except FeishuError as e:
+                logger.error(f"第 {seq} 个脚本飞书文档创建失败: {e}")
+                failed += 1
+                # 继续创建剩余文档
+
+        if not doc_urls:
+            raise FeishuError(f"全部 {total} 个文档创建均失败，请检查飞书配置。")
 
         st.session_state.doc_urls = doc_urls
         st.session_state.doc_url = doc_urls[0]
@@ -603,13 +772,16 @@ def step4_feishu():
         st.session_state.doc_created_at = time.time()
         st.session_state.step = 5
         st.session_state.generation_complete = True
-        st.session_state.status_msg = ""
+        if failed > 0:
+            st.session_state.status_msg = f"{len(doc_urls)} 个成功，{failed} 个失败"
+        else:
+            st.session_state.status_msg = ""
 
         # 登记文档（5 分钟后自动删除）
         register_docs(doc_ids, doc_urls)
         # 清理旧 checkpoint
         delete_checkpoint(st.session_state.video_url)
-        logger.info(f"飞书文档已创建: {len(doc_urls)} 个")
+        logger.info(f"飞书文档已创建: {len(doc_urls)} 个（{failed} 个失败）")
     except FeishuError as e:
         st.session_state.error = str(e)
         st.session_state.step = 0
@@ -726,46 +898,83 @@ def main():
     # 管理入口（侧栏）
     with st.sidebar:
         with st.expander("⚙️ 管理", expanded=False):
-            admin_pw = st.text_input("管理密码", type="password", placeholder="输入密码")
-            if st.button("进入管理后台", use_container_width=True):
-                if admin_pw == ADMIN_PASSWORD:
-                    st.session_state.admin_mode = True
-                    st.session_state.admin_msgs = []
-                    st.rerun()
-                elif admin_pw:
-                    st.error("密码错误")
+            admin_pw = st.text_input("管理密码", type="password", placeholder="输入密码", key="admin_pw_input")
+            col_login, col_forgot = st.columns([1, 1])
+            with col_login:
+                if st.button("进入管理后台", use_container_width=True):
+                    if admin_pw == ADMIN_PASSWORD:
+                        st.session_state.admin_mode = True
+                        st.session_state.admin_msgs = []
+                        st.rerun()
+                    elif admin_pw:
+                        st.error("密码错误")
+            with col_forgot:
+                with st.popover("忘记密码?"):
+                    recovery_key = ADMIN_RECOVERY_KEY
+                    if recovery_key:
+                        st.markdown("**恢复密钥**")
+                        st.caption("请输入恢复密钥来重置密码：")
+                        rk_input = st.text_input("恢复密钥", type="password", key="recovery_key_input")
+                        new_pw = st.text_input("新密码", type="password", key="recovery_new_pw")
+                        if st.button("重置密码", use_container_width=True):
+                            if rk_input == recovery_key:
+                                if new_pw:
+                                    save_admin_credentials(new_pw, recovery_key)
+                                    st.success("密码已重置！请使用新密码登录。")
+                                    st.caption("点击页面其他地方关闭此弹窗后重新登录。")
+                                else:
+                                    st.error("请输入新密码")
+                            else:
+                                st.error("恢复密钥错误")
+                    else:
+                        st.info(
+                            "未设置恢复密钥。如需重置密码，请在服务器上删除 "
+                            "`config/admin.json` 文件（如存在），密码将恢复为默认值 `admin888`。"
+                        )
 
     if st.session_state.step == 0:
         check_recovery()
         render_input_panel()
 
     elif st.session_state.step == 1:
-        # 全部管道在 st.status() 内一气呵成，单次 render 完成
-        # st.status() 流式传输进度，浏览器实时看到，不会出现 ghost 按钮
-        with st.status("处理中", expanded=True) as status:
-            status.write("提取视频...")
+        # Step 1/4: 提取视频（单独渲染周期，可显示进度）
+        render_progress_panel()
+        with st.status("第 1/4 步：提取视频（约 10-30 秒）...", expanded=True) as status:
             step1_extract()
-            status.write("分析视频...")
-            step2_analyze()
-            status.write("生成脚本...")
-            step3_generate()
-            status.write("创建飞书文档...")
-            step4_feishu()
-            status.update(label="全部完成", state="complete")
-        st.rerun()
+            if st.session_state.step == 2:
+                status.update(label="第 1/4 步：视频提取完成 ✓", state="complete")
+        if st.session_state.step in (2, 0):  # 0 = 失败回退到输入页
+            st.rerun()
 
     elif st.session_state.step in (2, 3, 4):
-        # 从 checkpoint 恢复，逐步骤执行
+        # 逐步骤执行，每个步骤一次 render + rerun，保证进度条实时更新
         render_progress_panel()
+        step_names = {2: "AI 分析视频（约 1-5 分钟）", 3: "生成脚本（约 10-30 秒）", 4: "创建飞书文档（约 5-15 秒）"}
+        step_labels_done = {2: "视频分析完成 ✓", 3: "脚本生成完成 ✓", 4: "飞书文档创建完成 ✓"}
+
         if st.session_state.step == 2:
-            step2_analyze()
-            st.rerun()
+            with st.status(f"第 2/4 步：{step_names[2]}...", expanded=True) as status:
+                step2_analyze()
+                if st.session_state.step == 3:
+                    status.update(label=f"第 2/4 步：{step_labels_done[2]}", state="complete")
+            if st.session_state.step in (3, 0):  # 0 = 失败回退到输入页
+                st.rerun()
+
         elif st.session_state.step == 3:
-            step3_generate()
-            st.rerun()
+            with st.status(f"第 3/4 步：{step_names[3]}...", expanded=True) as status:
+                step3_generate()
+                if st.session_state.step == 4:
+                    status.update(label=f"第 3/4 步：{step_labels_done[3]}", state="complete")
+            if st.session_state.step in (4, 0):
+                st.rerun()
+
         elif st.session_state.step == 4:
-            step4_feishu()
-            st.rerun()
+            with st.status(f"第 4/4 步：{step_names[4]}...", expanded=True) as status:
+                step4_feishu()
+                if st.session_state.step == 5:
+                    status.update(label=f"第 4/4 步：{step_labels_done[4]}", state="complete")
+            if st.session_state.step in (5, 0):
+                st.rerun()
 
     elif st.session_state.step == 5:
         render_result_panel()

@@ -103,6 +103,7 @@ class FeishuClient:
                 continue
             # 详细错误日志
             logger.error(f"飞书 API 调用失败: {method} {url}")
+            logger.error(f"请求体: {json.dumps(kwargs.get('json', kwargs.get('data', {})), ensure_ascii=False)[:500]}")
             logger.error(f"响应: code={code}, msg={data.get('msg', 'unknown')}")
             raise FeishuError(f"飞书 API 错误 (code={code}): {data.get('msg', 'unknown')}")
 
@@ -594,6 +595,11 @@ class FeishuClient:
             new_elements = []
             replaced = False
             for e in elements:
+                # 保留非 text_run 元素不变
+                if "text_run" not in e:
+                    new_elements.append(e)
+                    continue
+
                 text_run = e.get("text_run", {})
                 style = text_run.get("text_element_style", {})
                 content = text_run.get("content", "")
@@ -672,9 +678,26 @@ class FeishuClient:
 
             new_elements = []
             for e in elements:
+                # 保留非 text_run 元素（如 mention_user 等）不变
+                if "text_run" not in e:
+                    new_elements.append(e)
+                    continue
+
                 text_run = e.get("text_run", {})
                 content = text_run.get("content", "")
                 style = text_run.get("text_element_style", {})
+
+                # 构建基础 style（不含 background_color，除非原值存在且非 0）
+                base_style = {
+                    "bold": style.get("bold", False),
+                    "inline_code": False,
+                    "italic": False,
+                    "strikethrough": False,
+                    "underline": False,
+                }
+                bg = style.get("background_color")
+                if bg is not None and bg != 0:
+                    base_style["background_color"] = bg
 
                 # 替换【标题】行
                 if "【标题】" in content:
@@ -682,14 +705,7 @@ class FeishuClient:
                     new_elements.append({
                         "text_run": {
                             "content": new_content,
-                            "text_element_style": {
-                                "bold": style.get("bold", False),
-                                "inline_code": False,
-                                "italic": False,
-                                "strikethrough": False,
-                                "underline": False,
-                                "background_color": style.get("background_color", 0),
-                            }
+                            "text_element_style": base_style,
                         }
                     })
                 # 替换【正文】行
@@ -700,14 +716,7 @@ class FeishuClient:
                     new_elements.append({
                         "text_run": {
                             "content": new_content,
-                            "text_element_style": {
-                                "bold": style.get("bold", False),
-                                "inline_code": False,
-                                "italic": False,
-                                "strikethrough": False,
-                                "underline": False,
-                                "background_color": style.get("background_color", 0),
-                            }
+                            "text_element_style": base_style,
                         }
                     })
                 else:

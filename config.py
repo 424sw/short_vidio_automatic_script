@@ -36,6 +36,16 @@ def _decrypt(ciphertext: str) -> str:
     return plain_bytes.decode()
 
 
+def _encrypt(plaintext: str) -> str:
+    """加密明文为 base64 密文（与 _decrypt 配对）"""
+    import secrets as _secrets
+    salt = _secrets.token_bytes(16)
+    key = _derive_key(_DECRYPT_PASSWORD, salt, len(plaintext.encode()))
+    encrypted = bytes(a ^ b for a, b in zip(plaintext.encode(), key))
+    raw = salt + encrypted
+    return base64.urlsafe_b64encode(raw).decode()
+
+
 # ============================================================
 # API 密钥（环境变量 > st.secrets > 加密内置值）
 # ============================================================
@@ -63,7 +73,66 @@ FEISHU_APP_ID = _get_secret("FEISHU_APP_ID",
     "fccXklZ-jvIo4CaTnmbEL5jNZHidZwgOCsx0DwaC6Tf3xxdL")
 FEISHU_APP_SECRET = _get_secret("FEISHU_APP_SECRET",
     "lcuVw3ccI9NY0KUn4YJhAudEfF-REyQYnPVCYnvqf6kG903zweaA6q_P8U-mJ7rV")
-ADMIN_PASSWORD = _decrypt("RXGvYXYp3sK_lPUodoUHhArfpTwkoK1g")
+
+# ============================================================
+# 管理员密码 & 恢复密钥（admin.json > 内置硬编码默认值）
+# ============================================================
+
+_ADMIN_JSON_PATH = Path(__file__).parent / "config" / "admin.json"
+
+
+def _read_admin_json() -> dict:
+    """读取 admin.json（如果存在）"""
+    if _ADMIN_JSON_PATH.exists():
+        try:
+            with open(_ADMIN_JSON_PATH, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            pass
+    return {}
+
+
+def _get_admin_password() -> str:
+    """获取管理员密码：admin.json > 内置默认值"""
+    data = _read_admin_json()
+    enc = data.get("admin_password_encrypted", "")
+    if enc:
+        try:
+            return _decrypt(enc)
+        except Exception:
+            pass
+    return _decrypt("RXGvYXYp3sK_lPUodoUHhArfpTwkoK1g")
+
+
+def _get_recovery_key() -> str:
+    """获取恢复密钥（用于忘记密码时重置）"""
+    data = _read_admin_json()
+    enc = data.get("recovery_key_encrypted", "")
+    if enc:
+        try:
+            return _decrypt(enc)
+        except Exception:
+            pass
+    return ""
+
+
+def save_admin_credentials(password: str, recovery_key: str = "") -> bool:
+    """持久化管理员密码和恢复密钥到 admin.json"""
+    data = _read_admin_json()
+    data["admin_password_encrypted"] = _encrypt(password)
+    if recovery_key:
+        data["recovery_key_encrypted"] = _encrypt(recovery_key)
+    try:
+        _ADMIN_JSON_PATH.parent.mkdir(parents=True, exist_ok=True)
+        with open(_ADMIN_JSON_PATH, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+        return True
+    except Exception:
+        return False
+
+
+ADMIN_PASSWORD = _get_admin_password()
+ADMIN_RECOVERY_KEY = _get_recovery_key()
 
 # ============================================================
 # API 端点
@@ -315,6 +384,12 @@ def load_requirements() -> dict:
         return dict(_DEFAULT_REQUIREMENTS)
 
 
+def get_product_descriptions() -> list[dict]:
+    """获取产品介绍库（用于广告后紧跟的产品描述匹配）"""
+    req = load_requirements()
+    return req.get("产品介绍库", [])
+
+
 def build_mix_prompt(synthesis: str, custom_requirements: str = "") -> str:
     """构建混剪脚本 Prompt。
 
@@ -329,6 +404,7 @@ def build_mix_prompt(synthesis: str, custom_requirements: str = "") -> str:
     lo, hi = m["行数范围"]
 
     override = _build_override_section(custom_requirements)
+    products_section = _build_product_section()
 
     return f"""你是一位短视频脚本策划专家。请根据以下视频分析，生成一个**混剪脚本**。
 {override}
@@ -354,7 +430,8 @@ def build_mix_prompt(synthesis: str, custom_requirements: str = "") -> str:
 - 文案风格：{m["文案风格"]}
 - 素材列格式：{m["素材格式"]}
 - 素材风格：{m["素材风格"]}
-- 广告植入：{ad["品牌"]}{ad["描述"]}，放在{ad["位置"]}
+- 广告植入：{ad["品牌"]}{ad["描述"]}，放在{ad["位置"]}。{ad.get("产品介绍来源", "广告品牌后紧跟一段产品介绍（20-40字）")}
+{products_section}
 - 语言：{g["语言"]}"""
 
 
@@ -372,6 +449,8 @@ def build_oral_prompt(synthesis: str, custom_requirements: str = "") -> str:
     role_fmt = "、".join(o["角色格式"])
 
     override = _build_override_section(custom_requirements)
+
+    products_section = _build_product_section()
 
     return f"""你是一位短视频脚本策划专家。请根据以下视频分析，生成一个**口播脚本**。
 {override}
@@ -404,6 +483,8 @@ def build_oral_prompt(synthesis: str, custom_requirements: str = "") -> str:
 - 原片文案：{o["原片风格"]}，{o["原片文案字数"]}
 - 图片素材：{o["图片素材数量"]} 条，{o["图片素材格式"]}
 - 对话结构：{o["对话结构"]}
+- 广告植入：在对话中软性植入「鱼泡直聘」品牌推荐，放在约前50%位置。根据视频内容从产品介绍库中选择最匹配的一条文案
+{products_section}
 - 语言：{g["语言"]}"""
 
 
@@ -420,6 +501,30 @@ def _build_override_section(custom_text: str) -> str:
 
 **重要**：请将以上用户自定义要求与默认规则合并使用。如有冲突，以用户自定义要求为准。
 """
+
+
+def _build_product_section() -> str:
+    """构建产品介绍库段落（供 Prompt 使用）。
+
+    列出所有可选的产品介绍文案，让 AI 根据视频内容选择最匹配的一条。
+    """
+    products = get_product_descriptions()
+    if not products:
+        return ""
+
+    lines = [
+        "\n## 📦 产品介绍库（广告后紧跟）",
+        "根据视频内容主题，从下方产品介绍库中选择**最匹配的一条**文案，"
+        "紧跟在广告品牌「鱼泡直聘」名称之后（约20-40字）。",
+        "选择标准：判断视频的核心话题（如制造业/校招/兼职/技能培训/通用），对应选择。",
+        "",
+    ]
+    for i, p in enumerate(products):
+        lines.append(f"{i+1}. 【{p.get('主题', '')}】适用：{p.get('适用场景', '')}")
+        lines.append(f"   文案：{p.get('文案', '')}")
+        lines.append("")
+
+    return "\n".join(lines)
 
 
 # ============================================================
