@@ -17,7 +17,7 @@ from openai import OpenAI
 from config import (
     QUALITY_PRESETS, get_quality_config, generate_doc_title,
     AGNES_BASE_URL, AGNES_API_KEY, AGNES_MODEL, ADMIN_PASSWORD,
-    save_admin_credentials, ADMIN_RECOVERY_KEY,
+    save_admin_credentials,
 )
 from src.douyin_extractor import DouyinExtractor, DouyinError
 from src.video_analyzer import VideoAnalyzer, VideoAnalysisError
@@ -36,7 +36,7 @@ st.set_page_config(
     page_title="短视频脚本生成系统",
     page_icon="🎬",
     layout="centered",
-    initial_sidebar_state="collapsed",
+    initial_sidebar_state="expanded",
     menu_items={
         "Get help": None,
         "Report a bug": None,
@@ -220,18 +220,22 @@ def render_input_panel():
         )
 
     with st.expander("自定义要求（可选）", expanded=False):
+        st.markdown('<p style="font-size:0.875rem; margin:0 0 0.25rem 0;">文字描述</p>', unsafe_allow_html=True)
         custom = st.text_area(
-            "文字描述",
+            "",
             value=st.session_state.get("custom_requirements", ""),
             height=80,
             placeholder="例：标题短一点，只要 8 行，不要广告，语气轻松活泼",
             key="custom_req_input",
+            label_visibility="collapsed",
         )
+        st.markdown('<p style="font-size:0.875rem; margin:0 0 0.25rem 0;">上传图片</p>', unsafe_allow_html=True)
         uploaded_files = st.file_uploader(
-            "上传图片",
-            type=["png", "jpg", "jpeg", "webp"],
+            "",
+            type=["png", "jpg", "webp"],
             accept_multiple_files=True,
             key="req_image_uploader",
+            label_visibility="collapsed",
         )
         extracted = st.session_state.get("req_images_extracted", "")
         if extracted:
@@ -267,8 +271,8 @@ def render_input_panel():
         st.session_state.script_type = script_type
         st.session_state.quality = quality
         st.session_state.script_count = script_count
-        st.session_state.step = 1
         st.session_state.elapsed_start = time.time()
+        st.session_state.step = 1
         st.rerun()
 
 
@@ -276,12 +280,20 @@ def render_input_panel():
 # 面板二：进度
 # ============================================================
 
+# 各步骤预计时间（按输出质量分级，确保单步 ≤ 总预计）
+_STEP_TIMES = {
+    "fast":      {1: "约 10-20 秒", 2: "约 30-90 秒", 3: "约 10-20 秒", 4: "约 5-10 秒"},
+    "standard":  {1: "约 15-30 秒", 2: "约 2-4 分钟", 3: "约 10-25 秒", 4: "约 5-12 秒"},
+    "fine":      {1: "约 20-40 秒", 2: "约 5-9 分钟", 3: "约 10-30 秒", 4: "约 5-15 秒"},
+}
+
+
 def render_progress_panel():
     step = st.session_state.step
     step_labels = {1: "提取视频", 2: "AI 分析视频", 3: "生成脚本", 4: "创建飞书文档"}
 
-    # 各步骤预计时间
-    step_times = {1: "约 10-30 秒", 2: "约 1-5 分钟", 3: "约 10-30 秒", 4: "约 5-15 秒"}
+    quality = st.session_state.get("quality", "standard")
+    step_times = _STEP_TIMES.get(quality, _STEP_TIMES["standard"])
 
     elapsed = time.time() - st.session_state.elapsed_start
     e_str = f"{int(elapsed // 60)} 分 {int(elapsed % 60)} 秒" if elapsed >= 60 else f"{int(elapsed)} 秒"
@@ -295,7 +307,7 @@ def render_progress_panel():
     bar = "  ".join([filled, current, empty]) if filled else "  ".join([current, empty])
 
     st.markdown(f"""
-    <div style="text-align:center; margin: 3.5rem 0 2rem 0;">
+    <div style="text-align:center; margin: 1rem 0 1.5rem 0;">
         <div style="font-size: 1.5em; letter-spacing: 4px; margin-bottom: 0.75rem;">{bar}</div>
         <div style="font-size: 1.05em; color: #333; margin: 0.5rem 0;">
             第 {step} 步 &middot; {step_labels.get(step, '...')}
@@ -386,7 +398,7 @@ _ADMIN_REQ_PATH = Path(__file__).parent / "config" / "requirements.json"
 _ADMIN_SYSTEM_PROMPT = """你是一个短视频脚本生成系统的配置助手。用户用自然语言描述想要修改的规则，你负责将他的意图精确翻译为 JSON 配置的变更。
 
 当前系统有这些配置节：
-- **模板配置**：飞书文件夹Token、混剪模板ID、口播模板ID（如替换模板文档时使用）
+- **模板配置**：飞书文件夹Token、混剪模板ID、口播模板ID、产品介绍库链接（统一管理外部链接）
 - **通用**：语言、返回格式
 - **混剪**：标题字数、行数范围、文案风格、素材格式/风格、广告植入
 - **口播**：标题字数、对话轮数、角色格式、情绪选项、图片素材、对话结构
@@ -492,112 +504,22 @@ def _admin_ask_ai_with_image(user_msg: str, current_config: dict, image_bytes: b
 
 
 def render_admin_panel():
-    # 先渲染 sidebar（让退出按钮在侧栏）
-    with st.sidebar:
-        st.markdown("### 管理控制台")
-        if st.button("← 返回用户界面", use_container_width=True):
-            st.session_state.admin_mode = False
-            st.session_state.admin_msgs = []
-            st.rerun()
-        st.divider()
-        st.caption("修改不会自动同步到 ModelScope 创空间。若需更新线上版本，请 push 代码。")
+    # ========== 中部：输入区 ==========
+    st.markdown('<p style="font-size:0.875rem; margin:0 0 0.25rem 0;">文字描述</p>', unsafe_allow_html=True)
+    prompt = st.chat_input("例如：混剪行数改成 8-12 行...")
+    st.markdown('<p style="font-size:0.875rem; margin:0 0 0.25rem 0;">上传图片</p>', unsafe_allow_html=True)
+    admin_upload = st.file_uploader(
+        "",
+        type=["png", "jpg", "jpeg", "webp"],
+        key="admin_image_uploader",
+        label_visibility="collapsed",
+    )
 
-    st.title("配置管理")
-    st.caption("用自然语言修改脚本规则 → AI 翻译 → 确认生效。支持上传图片输入要求。")
-
-    # ---- 可管理内容指示 ----
-    with st.expander("📋 可管理内容指示", expanded=False):
-        cols = st.columns(3)
-        with cols[0]:
-            st.markdown("**📁 模板配置**")
-            st.caption("文件夹Token\n混剪模板ID\n口播模板ID")
-            st.markdown("**🎬 混剪规则**")
-            st.caption("标题字数、行数范围\n文案风格、素材格式\n广告品牌/描述/位置")
-        with cols[1]:
-            st.markdown("**🎤 口播规则**")
-            st.caption("标题字数、对话轮数\n角色格式、情绪选项\n图片素材、对话结构")
-            st.markdown("**📤 交付要求**")
-            st.caption("话题词数量/格式\n【标题】【正文】字段\n【是否发布】【发布类型】")
-        with cols[2]:
-            st.markdown("**📦 产品介绍库**")
-            st.caption("广告后紧跟的产品文案\n可按主题匹配选择")
-            st.markdown("**⚙️ 通用设置**")
-            st.caption("语言、返回格式\n交付要求保护规则")
-
-    # ---- 修改管理密码 ----
-    with st.expander("🔒 修改管理密码", expanded=False):
-        old_pw = st.text_input("当前密码", type="password", key="change_old_pw")
-        new_pw = st.text_input("新密码", type="password", key="change_new_pw")
-        new_pw_confirm = st.text_input("确认新密码", type="password", key="change_new_pw_confirm")
-        if st.button("确认修改密码", type="primary"):
-            if old_pw != ADMIN_PASSWORD:
-                st.error("当前密码错误")
-            elif not new_pw:
-                st.error("新密码不能为空")
-            elif new_pw != new_pw_confirm:
-                st.error("两次输入的新密码不一致")
-            else:
-                # 生成新的恢复密钥（或保留旧的）
-                import secrets
-                new_recovery = secrets.token_hex(6)  # 12位十六进制
-                if save_admin_credentials(new_pw, new_recovery):
-                    st.success(f"密码已修改！请妥善保存新的恢复密钥：")
-                    st.code(new_recovery, language=None)
-                    st.caption("⚠️ 请立即复制保存此恢复密钥。关闭后不可再次查看。")
-                else:
-                    st.error("密码保存失败，请检查文件权限。")
-
-    st.divider()
-
-    # 对话历史
-    for i, msg in enumerate(st.session_state.admin_msgs):
-        with st.chat_message(msg["role"]):
-            st.markdown(msg["content"])
-            if msg.get("pending_config") and not msg.get("resolved"):
-                cfg = msg["pending_config"]
-                with st.expander("查看变更", expanded=True):
-                    c1, c2 = st.columns(2)
-                    with c1:
-                        st.caption("当前")
-                        try:
-                            current = json.loads(_ADMIN_REQ_PATH.read_text(encoding="utf-8"))
-                            st.code(_admin_config_to_text(current), language=None)
-                        except Exception:
-                            st.write("读取失败")
-                    with c2:
-                        st.caption("修改后")
-                        st.code(_admin_config_to_text(cfg), language=None)
-                a1, a2 = st.columns([1, 1])
-                with a1:
-                    if st.button("✅ 确认保存", key=f"adm_save_{i}", type="primary"):
-                        with open(_ADMIN_REQ_PATH, "w", encoding="utf-8") as f:
-                            json.dump(cfg, f, ensure_ascii=False, indent=2)
-                        msg["resolved"] = True
-                        msg["content"] += "\n\n✅ 已保存。重启 Streamlit 后生效。"
-                        st.rerun()
-                with a2:
-                    if st.button("撤销", key=f"adm_undo_{i}"):
-                        msg["resolved"] = True
-                        msg["content"] += "\n\n已撤销。"
-                        st.rerun()
-
-    # 图片上传 + 文本输入
-    col_img, col_txt = st.columns([1, 3])
-    with col_img:
-        admin_upload = st.file_uploader(
-            "📷 上传图片（可选）",
-            type=["png", "jpg", "jpeg", "webp"],
-            key="admin_image_uploader",
-            label_visibility="collapsed",
-        )
-    with col_txt:
-        prompt = st.chat_input("例如：混剪行数改成 8-12 行、广告品牌改成小红书...")
-
-    if prompt:  # 仅当用户输入文字时才处理（图片是可选附加）
+    if prompt:
         user_msg = prompt
         display_msg = user_msg
         if admin_upload:
-            display_msg = f"📷 [{admin_upload.name}] {user_msg}"
+            display_msg = f"[{admin_upload.name}] {user_msg}"
         if admin_upload:
             user_msg = f"[上传图片: {admin_upload.name}] " + user_msg
 
@@ -627,6 +549,40 @@ def render_admin_panel():
         else:
             st.session_state.admin_msgs.append({"role": "assistant", "content": reply})
         st.rerun()
+
+    st.divider()
+
+    # ========== 底部：AI 对话历史 ==========
+    for i, msg in enumerate(st.session_state.admin_msgs):
+        with st.chat_message(msg["role"]):
+            st.markdown(msg["content"])
+            if msg.get("pending_config") and not msg.get("resolved"):
+                cfg = msg["pending_config"]
+                with st.expander("查看变更", expanded=True):
+                    c1, c2 = st.columns(2)
+                    with c1:
+                        st.caption("当前")
+                        try:
+                            current = json.loads(_ADMIN_REQ_PATH.read_text(encoding="utf-8"))
+                            st.code(_admin_config_to_text(current), language=None)
+                        except Exception:
+                            st.write("读取失败")
+                    with c2:
+                        st.caption("修改后")
+                        st.code(_admin_config_to_text(cfg), language=None)
+                a1, a2 = st.columns([1, 1])
+                with a1:
+                    if st.button("确认保存", key=f"adm_save_{i}", type="primary"):
+                        with open(_ADMIN_REQ_PATH, "w", encoding="utf-8") as f:
+                            json.dump(cfg, f, ensure_ascii=False, indent=2)
+                        msg["resolved"] = True
+                        msg["content"] += "\n\n已保存，即时生效。"
+                        st.rerun()
+                with a2:
+                    if st.button("撤销", key=f"adm_undo_{i}"):
+                        msg["resolved"] = True
+                        msg["content"] += "\n\n已撤销。"
+                        st.rerun()
 
 
 # ============================================================
@@ -860,10 +816,48 @@ def check_recovery():
 # ============================================================
 
 def main():
-    # 隐藏标题悬浮锚点图标 + 帮助问号
+    # 隐藏 Streamlit 默认工具栏 + 页脚 + 悬浮锚点，保持全中文界面
     st.markdown("""
     <style>
+    /* 强制滚动条始终可见，防止展开/收起 expander 时页面左右偏移 */
+    html, body, [data-testid="stAppViewContainer"] { overflow-y: scroll !important; }
+    html { scrollbar-gutter: stable; }
+    /* 隐藏右上角 Streamlit 工具栏（Deploy / ⋮ 英文菜单） */
+    [data-testid="stToolbar"] { display: none !important; }
+    /* 隐藏页脚 "Made with Streamlit" */
+    footer { display: none !important; }
+    /* 隐藏标题悬浮锚点图标 */
     .stMarkdown h1 a, .stMarkdown h2 a, .stMarkdown h3 a { display: none; }
+    /* 隐藏浏览器原生的密码可见性切换按钮 */
+    input[type="password"]::-ms-reveal, input[type="password"]::-ms-clear { display: none !important; }
+    input[type="password"]::-webkit-credentials-auto-fill-button { display: none !important; }
+    /* 管理界面 — 文件上传框高度与对话框对齐、替换拖拽文字 */
+    [data-testid="stFileUploader"] section { padding: 0 !important; min-height: 0 !important; }
+    [data-testid="stFileUploader"] section > div:first-child { padding: calc(.5em - 1px) 8px !important; }
+    [data-testid="stFileUploader"] span[data-testid="stFileUploaderDropzoneText"] { font-size: 0 !important; }
+    [data-testid="stFileUploader"] span[data-testid="stFileUploaderDropzoneText"]::after { content: "上传图片" !important; font-size: 0.88rem !important; }
+    [data-testid="stFileUploaderDropzone"] small { display: none !important; }
+    [data-testid="stFileUploaderDropzone"] { min-height: 0 !important; }
+    /* 管理界面 st.code() 代码块自动换行，防止长行撑破对话框 */
+    [data-testid="stCodeBlock"] pre, [data-testid="stCodeBlock"] code {
+        white-space: pre-wrap !important;
+        word-break: break-word !important;
+        overflow-wrap: break-word !important;
+    }
+    /* 移动端：上传框内容不换行，含拖拽区文字和已上传文件名 */
+    @media (max-width: 768px) {
+        [data-testid="stFileUploaderDropzone"],
+        [data-testid="stFileUploaderDropzone"] * {
+            white-space: nowrap !important;
+            overflow: hidden !important;
+            text-overflow: ellipsis !important;
+        }
+        [data-testid="stFileUploaderFileData"] {
+            white-space: nowrap !important;
+            overflow: hidden !important;
+            text-overflow: ellipsis !important;
+        }
+    }
     </style>
     """, unsafe_allow_html=True)
 
@@ -873,111 +867,166 @@ def main():
         delete_expired_docs()
         st.session_state.cleanup_done = True
 
-    # 管理后台模式 — 完全替换主界面
+    # ============================================================
+    # 页面头部 + 管理入口（主内容区右上角，不再依赖侧栏）
+    # ============================================================
     if st.session_state.admin_mode:
-        render_admin_panel()
-        return
-
-    # 每次页面加载时尝试清理过期文档
-    if st.session_state.step in (0, 5):
-        delete_expired_docs()
-
-    # 头部
-    st.markdown("""
-    <div style="text-align:center; padding: 1rem 0 0.5rem 0;">
-        <h1 style="font-size:1.6rem; font-weight:700; margin-bottom:0.25rem;">短视频脚本生成系统</h1>
-        <p style="color:#888; font-size:0.9rem;">
-            粘贴抖音链接 &rarr; AI 分析 &rarr; 输出飞书文档
-        </p>
-    </div>
-    """, unsafe_allow_html=True)
-    st.divider()
-
-    render_error()
-
-    # 管理入口（侧栏）
-    with st.sidebar:
-        with st.expander("⚙️ 管理", expanded=False):
-            admin_pw = st.text_input("管理密码", type="password", placeholder="输入密码", key="admin_pw_input")
-            col_login, col_forgot = st.columns([1, 1])
-            with col_login:
-                if st.button("进入管理后台", use_container_width=True):
-                    if admin_pw == ADMIN_PASSWORD:
-                        st.session_state.admin_mode = True
-                        st.session_state.admin_msgs = []
-                        st.rerun()
-                    elif admin_pw:
-                        st.error("密码错误")
-            with col_forgot:
-                with st.popover("忘记密码?"):
-                    recovery_key = ADMIN_RECOVERY_KEY
-                    if recovery_key:
-                        st.markdown("**恢复密钥**")
-                        st.caption("请输入恢复密钥来重置密码：")
-                        rk_input = st.text_input("恢复密钥", type="password", key="recovery_key_input")
-                        new_pw = st.text_input("新密码", type="password", key="recovery_new_pw")
-                        if st.button("重置密码", use_container_width=True):
-                            if rk_input == recovery_key:
-                                if new_pw:
-                                    save_admin_credentials(new_pw, recovery_key)
-                                    st.success("密码已重置！请使用新密码登录。")
-                                    st.caption("点击页面其他地方关闭此弹窗后重新登录。")
-                                else:
-                                    st.error("请输入新密码")
-                            else:
-                                st.error("恢复密钥错误")
-                    else:
-                        st.info(
-                            "未设置恢复密钥。如需重置密码，请在服务器上删除 "
-                            "`config/admin.json` 文件（如存在），密码将恢复为默认值 `admin888`。"
-                        )
-
-    if st.session_state.step == 0:
-        check_recovery()
-        render_input_panel()
-
-    elif st.session_state.step == 1:
-        # Step 1/4: 提取视频（单独渲染周期，可显示进度）
-        render_progress_panel()
-        with st.status("第 1/4 步：提取视频（约 10-30 秒）...", expanded=True) as status:
-            step1_extract()
-            if st.session_state.step == 2:
-                status.update(label="第 1/4 步：视频提取完成 ✓", state="complete")
-        if st.session_state.step in (2, 0):  # 0 = 失败回退到输入页
+        st.markdown("""
+        <div style="text-align:center; padding: 1rem 0 0.5rem 0;">
+            <h1 style="font-size:1.6rem; font-weight:700; margin-bottom:0.25rem;">管理控制台</h1>
+            <p style="color:#888; font-size:0.9rem;">
+                修改脚本规则 · 管理模板配置 · AI 对话编辑
+            </p>
+        </div>
+        """, unsafe_allow_html=True)
+        if st.button("← 返回用户界面", use_container_width=True, key="header_return"):
+            st.session_state.admin_mode = False
+            st.session_state.admin_msgs = []
             st.rerun()
 
-    elif st.session_state.step in (2, 3, 4):
-        # 逐步骤执行，每个步骤一次 render + rerun，保证进度条实时更新
-        render_progress_panel()
-        step_names = {2: "AI 分析视频（约 1-5 分钟）", 3: "生成脚本（约 10-30 秒）", 4: "创建飞书文档（约 5-15 秒）"}
-        step_labels_done = {2: "视频分析完成 ✓", 3: "脚本生成完成 ✓", 4: "飞书文档创建完成 ✓"}
+        admin_top = st.empty()
+        with admin_top.container():
+            with st.expander("查看可管理的内容类型", expanded=False):
+                st.markdown("""
+                <table style="font-size:0.82rem; width:100%; border-collapse:collapse;">
+                <tr><td style="padding:4px 8px; width:6em; font-weight:600;">模板链接</td><td style="padding:4px 8px;">文件夹Token、混剪/口播模板ID、产品介绍库链接</td></tr>
+                <tr><td style="padding:4px 8px; font-weight:600;">内容要求</td><td style="padding:4px 8px;">混剪/口播规则、产品介绍库、交付要求字段</td></tr>
+                </table>
+                """, unsafe_allow_html=True)
 
-        if st.session_state.step == 2:
-            with st.status(f"第 2/4 步：{step_names[2]}...", expanded=True) as status:
-                step2_analyze()
-                if st.session_state.step == 3:
-                    status.update(label=f"第 2/4 步：{step_labels_done[2]}", state="complete")
-            if st.session_state.step in (3, 0):  # 0 = 失败回退到输入页
+            with st.expander("修改管理密码", expanded=False):
+                col_pw1, col_pw2, col_pw3 = st.columns(3)
+                with col_pw1:
+                    old_pw = st.text_input("当前密码", type="password", key="change_old_pw")
+                with col_pw2:
+                    new_pw = st.text_input("新密码", type="password", key="change_new_pw")
+                with col_pw3:
+                    new_pw_confirm = st.text_input("确认新密码", type="password", key="change_new_pw_confirm")
+                _, btn_col = st.columns([2, 1])
+                with btn_col:
+                    if st.button("确认修改密码", type="primary", use_container_width=True, key="change_pw_btn"):
+                        if old_pw != ADMIN_PASSWORD:
+                            st.error("当前密码错误")
+                        elif not new_pw:
+                            st.error("新密码不能为空")
+                        elif new_pw != new_pw_confirm:
+                            st.error("两次输入的新密码不一致")
+                        else:
+                            import secrets
+                            new_recovery = secrets.token_hex(6)
+                            if save_admin_credentials(new_pw, new_recovery):
+                                st.success("密码已修改！")
+                                st.markdown("**新的恢复密钥（请立即复制保存）：**")
+                                st.code(new_recovery, language=None)
+                                st.caption("此密钥可用于忘记密码时重置，也可交给其他管理员完成权限交接。关闭后不可再次查看。")
+                            else:
+                                st.error("密码保存失败，请检查文件权限。")
+
+        st.divider()
+    else:
+        st.markdown("""
+        <div style="text-align:center; padding: 1rem 0 0.5rem 0;">
+            <h1 style="font-size:1.6rem; font-weight:700; margin-bottom:0.25rem;">短视频脚本生成系统</h1>
+            <p style="color:#888; font-size:0.9rem;">
+                粘贴抖音链接 &rarr; AI 分析 &rarr; 输出飞书文档
+            </p>
+        </div>
+        """, unsafe_allow_html=True)
+
+        # 管理入口 — 分割线上方（st.empty 防止展开时页面偏移）
+        user_header = st.empty()
+        with user_header.container():
+            with st.expander("管理", expanded=False):
+                admin_pw = st.text_input("密码", type="password", placeholder="管理员密码", key="admin_pw_input")
+                c1, c2 = st.columns(2)
+                with c1:
+                    if st.button("进入后台", use_container_width=True, key="header_enter"):
+                        if admin_pw == ADMIN_PASSWORD:
+                            st.session_state.admin_mode = True
+                            st.session_state.admin_msgs = []
+                            st.rerun()
+                        elif admin_pw:
+                            st.error("密码错误")
+                with c2:
+                    with st.popover("忘记密码", use_container_width=True):
+                        st.info("忘记密码功能开发中，敬请期待。如需重置，请删除 `config/admin.json` 文件恢复默认密码 `admin888`。")
+
+        st.divider()
+
+    # ============================================================
+    # 分割线以下 — 可变内容区
+    # ============================================================
+
+    # 设置面板占位符 — step=0 时渲染输入面板，其他 step 自动清空以消除 ghost UI
+    settings_placeholder = st.empty()
+    if not st.session_state.admin_mode and st.session_state.step == 0:
+        with settings_placeholder.container():
+            render_input_panel()
+    else:
+        settings_placeholder.empty()
+
+    # 可变内容占位符 — 每次 .container() 调用完全替换旧 widgets
+    screen = st.empty()
+
+    if st.session_state.admin_mode:
+        with screen.container():
+            render_admin_panel()
+        return
+
+    # 用户模式 — 所有可变 UI 包裹在 container 内
+    with screen.container():
+        _quality = st.session_state.get("quality", "standard")
+        step_times = _STEP_TIMES.get(_quality, _STEP_TIMES["standard"])
+
+        if st.session_state.step in (0, 5):
+            delete_expired_docs()
+
+        render_error()
+
+        if st.session_state.step == 0:
+            check_recovery()
+
+        elif st.session_state.step == 1:
+            render_progress_panel()
+            _t1 = step_times.get(1, "约 10-30 秒")
+            with st.status(f"第 1/4 步：提取视频（{_t1}）...", expanded=True) as status:
+                step1_extract()
+                if st.session_state.step == 2:
+                    status.update(label="第 1/4 步：视频提取完成 ✓", state="complete")
+            if st.session_state.step in (2, 0):
                 st.rerun()
 
-        elif st.session_state.step == 3:
-            with st.status(f"第 3/4 步：{step_names[3]}...", expanded=True) as status:
-                step3_generate()
-                if st.session_state.step == 4:
-                    status.update(label=f"第 3/4 步：{step_labels_done[3]}", state="complete")
-            if st.session_state.step in (4, 0):
-                st.rerun()
+        elif st.session_state.step in (2, 3, 4):
+            render_progress_panel()
+            step_names = {2: f"AI 分析视频（{step_times.get(2, '约 2-4 分钟')}）", 3: f"生成脚本（{step_times.get(3, '约 10-30 秒')}）", 4: f"创建飞书文档（{step_times.get(4, '约 5-15 秒')}）"}
+            step_labels_done = {2: "视频分析完成 ✓", 3: "脚本生成完成 ✓", 4: "飞书文档创建完成 ✓"}
 
-        elif st.session_state.step == 4:
-            with st.status(f"第 4/4 步：{step_names[4]}...", expanded=True) as status:
-                step4_feishu()
-                if st.session_state.step == 5:
-                    status.update(label=f"第 4/4 步：{step_labels_done[4]}", state="complete")
-            if st.session_state.step in (5, 0):
-                st.rerun()
+            if st.session_state.step == 2:
+                with st.status(f"第 2/4 步：{step_names[2]}...", expanded=True) as status:
+                    step2_analyze()
+                    if st.session_state.step == 3:
+                        status.update(label=f"第 2/4 步：{step_labels_done[2]}", state="complete")
+                if st.session_state.step in (3, 0):
+                    st.rerun()
 
-    elif st.session_state.step == 5:
-        render_result_panel()
+            elif st.session_state.step == 3:
+                with st.status(f"第 3/4 步：{step_names[3]}...", expanded=True) as status:
+                    step3_generate()
+                    if st.session_state.step == 4:
+                        status.update(label=f"第 3/4 步：{step_labels_done[3]}", state="complete")
+                if st.session_state.step in (4, 0):
+                    st.rerun()
+
+            elif st.session_state.step == 4:
+                with st.status(f"第 4/4 步：{step_names[4]}...", expanded=True) as status:
+                    step4_feishu()
+                    if st.session_state.step == 5:
+                        status.update(label=f"第 4/4 步：{step_labels_done[4]}", state="complete")
+                if st.session_state.step in (5, 0):
+                    st.rerun()
+
+        elif st.session_state.step == 5:
+            render_result_panel()
 
 
 if __name__ == "__main__":

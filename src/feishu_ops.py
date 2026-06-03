@@ -11,7 +11,7 @@ from typing import Optional
 from config import (
     FEISHU_APP_ID, FEISHU_APP_SECRET,
     FEISHU_AUTH_URL, FEISHU_BASE_URL,
-    FOLDER_TOKEN, TEMPLATE_IDS,
+    get_folder_token, get_template_id,
     RETRY_MAX, RETRY_BACKOFF,
     generate_doc_title,
 )
@@ -120,7 +120,7 @@ class FeishuClient:
             template_type: "mix" 或 "oral"
             seq: 编号
         """
-        template_id = TEMPLATE_IDS[template_type]
+        template_id = get_template_id(template_type)
         name = generate_doc_title(template_type, seq)
 
         logger.info(f"复制{template_type}模板 → {name}")
@@ -130,7 +130,7 @@ class FeishuClient:
             json={
                 "name": name,
                 "type": "docx",
-                "folder_token": FOLDER_TOKEN,
+                "folder_token": get_folder_token(),
             },
         )
 
@@ -771,14 +771,13 @@ class FeishuClient:
 
     def delete_document(self, doc_id: str) -> bool:
         """删除飞书文档."""
-        url = f"{FEISHU_BASE_URL}/drive/v1/files/{doc_id}"
         try:
-            resp = self._session.delete(url, headers=self._auth_header(), timeout=15)
-            if resp.status_code == 200:
-                logger.info(f"文档已删除: {doc_id}")
-                return True
+            self._request("DELETE", f"{FEISHU_BASE_URL}/drive/v1/files/{doc_id}", timeout=15)
+            logger.info(f"文档已删除: {doc_id}")
+            return True
+        except FeishuError:
             # 已经不存在也算成功
-            return resp.status_code == 404
+            return False
         except Exception as e:
             logger.warning(f"删除文档 {doc_id} 异常: {e}")
             return False

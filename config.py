@@ -160,12 +160,14 @@ def _read_req_json():
     return {}
 
 
-def _get_folder_token():
+def get_folder_token():
+    """读取文件夹 Token（每次从磁盘读取，支持管理员热更新）"""
     tc = _read_req_json().get("模板配置", {})
     return tc.get("文件夹Token", "nodcnfKha8zoI7HaoGIBOg7D4Hh")
 
 
-def _get_template_id(t: str):
+def get_template_id(t: str):
+    """读取模板 ID（每次从磁盘读取，支持管理员热更新）"""
     tc = _read_req_json().get("模板配置", {})
     key = "混剪模板ID" if t == "mix" else "口播模板ID"
     defaults = {
@@ -173,13 +175,6 @@ def _get_template_id(t: str):
         "oral": "EbLGdZ2qYoQgpixsmQjc5EkjnNf",
     }
     return tc.get(key, defaults[t])
-
-
-FOLDER_TOKEN = _get_folder_token()
-TEMPLATE_IDS = {
-    "mix": _get_template_id("mix"),
-    "oral": _get_template_id("oral"),
-}
 
 # ============================================================
 # FFmpeg 路径（自动检测）
@@ -219,9 +214,6 @@ IPHONE_UA = (
 RETRY_MAX = 3
 RETRY_BACKOFF = 0.5
 
-# 并发帧分析配置
-FRAME_ANALYSIS_WORKERS = 4
-
 # 脚本生成温度（较低的值提高 JSON 结构稳定性）
 SCRIPT_GENERATION_TEMPERATURE = 0.3
 
@@ -232,36 +224,32 @@ SCRIPT_GENERATION_TEMPERATURE = 0.3
 QUALITY_PRESETS = {
     "fast": {
         "label": "🚀 快速",
-        "fps": "1/10",
-        "max_frames": 30,
+        "fps": "1",
+        "max_frames": 60,
         "workers": 4,
-        "est_time": "约 30 秒",
+        "est_time": "约 1-2 分钟",
         "description": "快速预览，适合尝鲜",
         "vision_detail": "简要描述画面关键元素",
     },
     "standard": {
         "label": "⚖️ 标准",
-        "fps": "1/5",
-        "max_frames": 60,
+        "fps": "2",
+        "max_frames": 150,
         "workers": 4,
-        "est_time": "约 1-2 分钟",
+        "est_time": "约 3-5 分钟",
         "description": "日常使用，平衡速度与质量",
         "vision_detail": "详细描述画面内容、文字、构图",
     },
     "fine": {
         "label": "🎯 精细",
-        "fps": "1/2",
-        "max_frames": 120,
+        "fps": "3",
+        "max_frames": 300,
         "workers": 3,
-        "est_time": "约 3-5 分钟",
+        "est_time": "约 6-10 分钟",
         "description": "精细分析，适合重要内容",
         "vision_detail": "尽可能详细地描述所有可见细节，包括人物微表情、画面色调、字体样式",
     },
 }
-
-# 默认值（兼容旧代码）
-FRAME_EXTRACT_FPS = QUALITY_PRESETS["standard"]["fps"]
-MAX_FRAMES = QUALITY_PRESETS["standard"]["max_frames"]
 
 # ============================================================
 # Prompt 模板

@@ -4,7 +4,8 @@
   "模板配置": {
     "文件夹Token": "nodcnfKha8zoI7HaoGIBOg7D4Hh",
     "混剪模板ID": "B1HtdfhjKo4g4QxgNNncCtVwnth",
-    "口播模板ID": "EbLGdZ2qYoQgpixsmQjc5EkjnNf"
+    "口播模板ID": "EbLGdZ2qYoQgpixsmQjc5EkjnNf",
+    "产品介绍库链接": "https://bcn0ov0rhrrv.feishu.cn/wiki/DkwNwFK21iLUr4kB8wVcygGxn5e"
   },
 
   "通用": {
@@ -23,8 +24,7 @@
       "品牌": "鱼泡直聘",
       "描述": "软广植入",
       "位置": "约前50%位置处",
-      "产品介绍来源": "从下方「产品介绍库」中，根据视频内容主题，选择最匹配的一段产品介绍文案，紧跟广告品牌名称之后（约20-40字）",
-      "wiki_url": "https://bcn0ov0rhrrv.feishu.cn/wiki/DkwNwFK21iLUr4kB8wVcygGxn5e"
+      "产品介绍来源": "从下方「产品介绍库」中，根据视频内容主题，选择最匹配的一段产品介绍文案，紧跟广告品牌名称之后（约20-40字）"
     }
   },
 
