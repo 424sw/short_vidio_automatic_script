@@ -9,168 +9,108 @@
 → 综合理解 → 生成脚本JSON → 复制飞书模板 → 填入内容 → 公开链接
 ```
 
-Web 应用基于 **Streamlit**，部署于 **ModelScope 创空间**（免费，中国大陆可访问，访客免登录）。
+Web 应用基于 **Streamlit**，部署于 **ModelScope 创空间**。
 
 ---
 
 ## 快速开始
 
-### 本地运行
 ```bash
 pip install -r requirements.txt
-streamlit run app.py    # 用户界面（端口 8501）
-streamlit run admin.py --server.port 8502 --server.headless true   # 管理后台（端口 8502）
+streamlit run app.py
+# 访问 http://localhost:8501
 ```
 
-### ModelScope 创空间部署
-
-1. 在 [ModelScope 创空间](https://www.modelscope.cn/studios) 创建新空间，**接入 SDK 必须选 Streamlit**
-2. 在创空间设置 → 环境变量，配置以下密钥（也可跳过，使用内置加密密钥）：
-   - `AGNES_API_KEY`（可选，已有内置值）
-   - `FEISHU_APP_ID`（可选，已有内置值）
-   - `FEISHU_APP_SECRET`（可选，已有内置值）
-3. Push 代码到创空间 Git 仓库
-4. 重启空间
-
-### ⚠️ 部署检查清单
-- [ ] 创空间设置 → 接入 SDK = **Streamlit**（不是 Gradio！）
-- [ ] `README.md` 头部 YAML 包含 `sdk: streamlit`
-- [ ] `app.py` 的 `__main__` 块不会 `sys.exit(0)`
-- [ ] `requirements.txt` 包含 `imageio-ffmpeg>=0.5.0`
+**app.py 是唯一入口**，包含用户界面和管理后台。管理后台通过侧边栏「⚙️ 管理」展开 → 输入密码进入。管理密码加密存储在 `config.py` 中。
 
 ---
 
-## 项目结构
+## 项目结构（GitHub 仓库）
 
 ```
-├── app.py                      # Streamlit 主入口（用户界面 + 流程编排）
-├── admin.py                    # 管理后台（自然语言修改配置）
-├── config.py                   # 全局配置、API 密钥、Prompt 构建、质量预设、FFmpeg 检测
-├── src/                        # 核心模块
-│   ├── __init__.py
-│   ├── douyin_extractor.py     # 抖音视频链接解析 + 下载
-│   ├── video_analyzer.py       # FFmpeg 抽帧 + AI vision 分析 + faster-whisper 转录
-│   ├── script_generator.py     # AI 脚本生成（混剪/口播）
-│   ├── feishu_ops.py           # 飞书 API 客户端（认证、复制、填充、权限）
-│   └── session_manager.py      # 磁盘 checkpoint 持久化
-├── config/                     # 配置文件
-│   └── requirements.json       # 脚本内容/输出要求的可配置规则
-├── requirements.txt            # Python 依赖
-├── .streamlit/                 # Streamlit 配置
-│   ├── config.toml             # UI 配置
-│   └── secrets.toml            # 本地密钥（gitignore）
+├── app.py                      ← 唯一入口：用户界面 + 管理后台
+├── config.py                   ← 配置中心（加密密钥、API端点、Prompt工厂、质量预设）
+├── requirements.txt            ← pip 依赖
+├── packages.txt                ← 系统依赖（ModelScope部署用）
+├── README.md                   ← 部署指引
+├── CLAUDE.md                   ← 本文件
 ├── .gitignore
-└── README.md
+├── .streamlit/
+│   └── config.toml             ← UI 主题
+├── config/
+│   └── requirements.json       ← 脚本规则 + 模板配置 + 交付要求（管理员对话修改）
+└── src/
+    ├── __init__.py
+    ├── douyin_extractor.py     ← 抖音链接解析 + 视频下载（支持从文本提取URL）
+    ├── video_analyzer.py       ← FFmpeg抽帧 + AI vision + faster-whisper转录 + 综合
+    ├── script_generator.py     ← AI脚本生成 + 结构/内容校验 + 多脚本 + 图片识别
+    ├── feishu_ops.py           ← 飞书API：认证、模板复制、权限、内容填充、删除
+    └── session_manager.py      ← 磁盘checkpoint持久化 + 过期清理
 ```
+
+本地存在的 `.streamlit/credentials.toml`、`.streamlit/secrets.toml`、`data/`、`.claude/`、`.mcp.json` 均不在仓库中。
 
 ---
 
 ## 架构与数据流
 
 ```
-app.py (UI层)
-  ├─ 输入：视频URL + 脚本类型 + 质量 + 自定义要求
-  ├─ Step1: douyin_extractor → 下载视频
-  ├─ Step2: video_analyzer → 逐帧分析 + 音频转录 + 综合报告
-  ├─ Step3: script_generator → 生成结构化脚本 JSON
-  ├─ Step4: feishu_ops → 复制飞书模板 + 填入内容 → doc_url
-  └─ 输出：飞书文档链接
+app.py (唯一入口)
+  ├─ 用户界面：粘贴链接 → 选择参数 → Step1~4
+  ├─ 管理后台：侧栏密码 → 对话修改 requirements.json
+  └─ 管道：
+      Step1 → douyin_extractor.extract()      → video_path, title
+      Step2 → video_analyzer.analyze()         → synthesis, transcript
+      Step3 → script_generator.generate()      → script JSON (+ hashtags)
+      Step4 → feishu_ops.create_and_fill()     → doc_url
 ```
 
-### 各模块职责
+---
+
+## 各模块职责
 
 | 模块 | 职责 |
 |------|------|
-| `app.py` | Streamlit UI、session state、流程编排、文档生命周期管理 |
-| `admin.py` | 独立管理后台，自然语言修改 requirements.json |
-| `config.py` | 配置、加密密钥、Prompt 构建、质量预设、FFmpeg 检测 |
-| `douyin_extractor.py` | 解析抖音链接 → 下载视频，支持从分享文本中提取 URL |
-| `video_analyzer.py` | FFmpeg 抽帧 + AI vision + faster-whisper 转录 + 综合分析 |
-| `script_generator.py` | AI 生成结构化脚本 JSON，支持多脚本、内容校验、图片识别 |
-| `feishu_ops.py` | 飞书 API 全操作：认证、模板复制、权限、内容填充 |
+| `app.py` | Streamlit UI、session state、三步面板替换、4步管道、文档生命周期（5min TTL）、管理后台嵌入 |
+| `config.py` | 密钥（XOR+SHA256加密存储）、API端点、Prompt构建函数、质量预设、FFmpeg检测 |
+| `douyin_extractor.py` | 正则提取URL（支持分享文本）、下载视频 |
+| `video_analyzer.py` | FFmpeg抽帧、AI vision逐帧描述、faster-whisper语音转录、综合报告 |
+| `script_generator.py` | AI生成结构化JSON（含hashtags）、内容校验+重试反馈、多脚本多样性控制、图片要求提取 |
+| `feishu_ops.py` | 飞书API：OAuth认证、模板复制、Block操作（get/update/insert_row）、权限设置、交付要求字段填充 |
+| `session_manager.py` | SHA256(url)→session key、state.json checkpoint、24h过期清理 |
 
 ---
 
-## 配置系统
-
-### 三层配置架构
+## 配置系统（两层）
 
 ```
-requirements.json          ← 出厂默认值
+requirements.json          ← 出厂默认值 + 管理员对话修改
     ↓
-admin.py 自然语言修改      ← 管理员用大白话自定义
+[app.py 管理后台]          ← 管理员侧栏输入密码 → 自然语言对话 → 确认保存 → 修改 requirements.json
     ↓
-Prompt 构建函数             ← 合并为最终 Prompt
+config.py Prompt构建函数    ← 合并默认值 → 最终 Prompt
 ```
-
-### 质量预设
-
-| 级别 | fps | 最大帧 | Worker | 预计耗时 |
-|------|-----|--------|--------|---------|
-| 快速 | 1/10 | 30 | 4 | ~30秒 |
-| 标准 | 1/5 | 60 | 4 | ~1-2分钟 |
-| 精细 | 1/2 | 120 | 3 | ~3-5分钟 |
 
 ---
 
-## API 密钥管理
+## 密钥管理
 
-密钥以加密形式存储在 `config.py` 中，运行时自动解密。同时也支持环境变量覆盖。
-
-如需更换密钥（如使用自己的 Agnes AI 账号或飞书应用）：
-1. 在创空间 / 本地设置环境变量 `AGNES_API_KEY`、`FEISHU_APP_ID`、`FEISHU_APP_SECRET`
-2. 或在本地创建 `.streamlit/secrets.toml`（已 gitignore）
-
-环境变量的优先级高于内置加密值。
-
-### 依赖的外部服务
-
-| 服务 | 说明 |
-|------|------|
-| Agnes AI (`apihub.agnes-ai.com`) | AI 模型 API（文本 + vision） |
-| 飞书开放平台 (`open.feishu.cn`) | 文档创建、模板复制、内容填充 |
-| FFmpeg | 视频抽帧和音频提取（自动检测，支持 imageio-ffmpeg 兜底） |
+API 密钥（Agnes API Key、飞书 App ID/Secret、管理密码）使用 XOR+SHA256+Base64 加密存储在 `config.py` 中，运行时自动解密。支持环境变量覆盖（优先级：环境变量 > streamlit secrets > 内置加密值）。
 
 ---
 
 ## 飞书 API 已知行为
 
-### 可用
-- 获取 tenant_access_token、复制文件、设置公开权限
-- 读写文档 blocks、插入表格行、更新文本（含黄色高亮）
-- 图片上传（需传 parent_node）
-
-### 不可用
-- 飞书 docx API 不支持创建 Image Block（block_type=27）
-- 替代方案：素材列写文字描述
-
-### 表格 Block 结构（重要）
-`table.children` 是扁平列表（row-major）：
-```
-children[r * C + c] = cell(r, c)   （C = 列数）
-```
+- **可用**：获取token、复制文件、设置权限、读写blocks、插入表格行、更新文本（黄色高亮）、上传图片
+- **不可用**：创建 Image Block（block_type=27）→ 素材列写文字描述
+- **表格结构**：`children` 是扁平列表（row-major），`children[r*C+c] = cell(r,c)`
+- **模板ID和文件夹Token** 存储在 `requirements.json` 的「模板配置」节
 
 ---
 
-## 脚本格式规范
+## 脚本格式
 
-| 类型 | 表格 | 核心要求 |
-|------|------|---------|
-| 混剪 | 内容 \| 素材（双栏） | 10-16 行，文案无标点，素材为文件名.jpg+描述 |
-| 口播 | 原片文案 \| 口播脚本 \| 图片素材（三栏） | 20 轮 A/B 对话，末尾带【情绪标记】 |
-
----
-
-## 已知限制
-
-- 飞书 API 不支持插入图片到文档
-- 视频分析通过逐帧 vision + 音频转录实现，非原生视频理解
-- ModelScope 移动端会显示完整创空间外壳
-
----
-
-## 维护
-
-- 管理员界面：`streamlit run admin.py --server.port 8502`
-- 修改脚本规则：打开管理后台 → 对话描述需求 → 确认保存
-- 修改后 push 到创空间仓库使其生效
+| 类型 | 结构 | 要求 |
+|------|------|------|
+| 混剪 | title + hashtags + rows(name+material) | 10-16行，文案无标点，素材=文件名.jpg+描述 |
+| 口播 | title + hashtags + original_text + dialogs(A+B+情绪) + images | 20轮对话，末尾【情绪标记】 |
