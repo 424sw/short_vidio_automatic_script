@@ -457,20 +457,24 @@ def main():
 
 
 if __name__ == "__main__":
-    import os, sys, subprocess
-    # 当被 python3 直接调用时（如 ModelScope 创空间），自动启动 Streamlit 服务器
-    # 如果已在 Streamlit 环境中运行，则执行 main()
+    import os, sys
+    # 检测是否已在 Streamlit 环境中运行
+    in_streamlit = False
     try:
         from streamlit.runtime.scriptrunner import get_script_run_ctx
         ctx = get_script_run_ctx()
         if ctx is not None:
-            main()
-        else:
-            raise RuntimeError("Not in Streamlit context")
+            in_streamlit = True
+            main()   # 定义 UI 后自然返回，让 streamlit 接管进程生命周期
     except Exception:
-        port = int(os.environ.get("PORT", 8501))
-        print(f"Launching Streamlit on port {port}...")
-        subprocess.run([sys.executable, "-m", "streamlit", "run", __file__,
-                        "--server.port", str(port),
-                        "--server.address", "0.0.0.0",
-                        "--server.headless", "true"])
+        pass
+    if not in_streamlit:
+        # 被 python3 直接调用，用 execvpe 原地替换进程为 streamlit
+        # 保持同一 PID，平台包装器能直接检测到健康状态
+        port = os.environ.get("PORT", "8501")
+        os.execvpe(sys.executable, [
+            sys.executable, "-m", "streamlit", "run", __file__,
+            "--server.port", port,
+            "--server.address", "0.0.0.0",
+            "--server.headless", "true",
+        ], os.environ)
