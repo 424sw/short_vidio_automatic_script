@@ -396,7 +396,11 @@ class FeishuClient:
         # 重新获取（表格填充可能插入了行），然后更新封面标题
         blocks = self.get_blocks(doc_id)
         block_map = {b["block_id"]: b for b in blocks}
-        self._update_cover_title_bullet(doc_id, blocks, block_map, script.get("title", ""))
+        self._update_cover_title_bullet(doc_id, blocks, block_map, title=script.get("title", ""))
+        # 更新交付要求中的【标题】和【正文】字段
+        self._update_delivery_fields(doc_id, blocks, block_map,
+                                     title=script.get("title", ""),
+                                     hashtags=script.get("hashtags", []))
 
         return result
 
@@ -508,8 +512,11 @@ class FeishuClient:
 
         self._fill_oral_table(doc_id, table_block, script, blocks, block_map)
 
-        # --- Step 5: 更新封面标题 ---
-        self._update_cover_title_bullet(doc_id, blocks, block_map, script.get("title", ""))
+        # --- Step 5: 更新封面标题 + 交付要求字段 ---
+        self._update_cover_title_bullet(doc_id, blocks, block_map, title=script.get("title", ""))
+        self._update_delivery_fields(doc_id, blocks, block_map,
+                                     title=script.get("title", ""),
+                                     hashtags=script.get("hashtags", []))
 
         logger.info("口播模板填充完成")
         return "oral"
@@ -631,12 +638,100 @@ class FeishuClient:
                 logger.info(f"已更新封面要求标题为: {title}")
                 return
 
+    def _update_delivery_fields(self, doc_id: str, blocks: list,
+                                 block_map: dict, title: str,
+                                 hashtags: list = None):
+        """更新交付要求中的【标题】和【正文】字段.
+
+        【标题】→ 脚本标题
+        【正文】→ 标题 + 话题词（如：标题文本 #话题1 #话题2）
+        【是否发布】和【发布类型】保持模板默认值不变。
+        """
+        if hashtags is None:
+            hashtags = []
+
+        # 构建话题词字符串
+        hashtag_str = " ".join(f"#{t.strip('#')}" for t in hashtags) if hashtags else ""
+
+        # 构建【正文】内容：标题 + 话题词
+        if hashtag_str:
+            body_text = f"{title} {hashtag_str}"
+        else:
+            body_text = title
+
+        for block in blocks:
+            if block["block_type"] != 2:  # text block
+                continue
+
+            elements = block.get("text", {}).get("elements", [])
+            full_text = "".join(e.get("text_run", {}).get("content", "") for e in elements)
+
+            # 找到包含【标题】和【正文】的文本块
+            if "【标题】" not in full_text or "【正文】" not in full_text:
+                continue
+
+            new_elements = []
+            for e in elements:
+                text_run = e.get("text_run", {})
+                content = text_run.get("content", "")
+                style = text_run.get("text_element_style", {})
+
+                # 替换【标题】行
+                if "【标题】" in content:
+                    new_content = content.replace("填写标题即可", title)
+                    new_elements.append({
+                        "text_run": {
+                            "content": new_content,
+                            "text_element_style": {
+                                "bold": style.get("bold", False),
+                                "inline_code": False,
+                                "italic": False,
+                                "strikethrough": False,
+                                "underline": False,
+                                "background_color": style.get("background_color", 0),
+                            }
+                        }
+                    })
+                # 替换【正文】行
+                elif "【正文】" in content:
+                    new_content = content.replace(
+                        "填写标题➕话题词即可", body_text
+                    )
+                    new_elements.append({
+                        "text_run": {
+                            "content": new_content,
+                            "text_element_style": {
+                                "bold": style.get("bold", False),
+                                "inline_code": False,
+                                "italic": False,
+                                "strikethrough": False,
+                                "underline": False,
+                                "background_color": style.get("background_color", 0),
+                            }
+                        }
+                    })
+                else:
+                    # 【是否发布】【发布类型】等保持不变
+                    new_elements.append({"text_run": text_run})
+
+            body = {"update_text_elements": {"elements": new_elements}}
+            self._request(
+                "PATCH",
+                f"{FEISHU_BASE_URL}/docx/v1/documents/{doc_id}/blocks/{block['block_id']}",
+                json=body,
+            )
+            logger.info(f"已更新交付要求字段: 标题={title}, 正文={body_text}")
+            return
+
+        logger.warning("未找到【标题】【正文】字段块，跳过更新")
+
     # ============================================================
     # 完整流程
     # ============================================================
 
     def create_and_fill(self, script_type: str, script: dict,
-                        video_url: str, video_title: str) -> dict:
+                        video_url: str, video_title: str,
+                        seq: int = 1) -> dict:
         """完整流程: 复制模板 → 设权限 → 填内容 → 返回链接.
 
         Args:
@@ -644,12 +739,13 @@ class FeishuClient:
             script: 生成的脚本 JSON
             video_url: 抖音视频链接
             video_title: 视频标题
+            seq: 文档编号（多脚本模式下区分不同文档）
 
         Returns:
             {"doc_id": str, "url": str}
         """
         # 1. 复制模板
-        result = self.copy_template(script_type)
+        result = self.copy_template(script_type, seq=seq)
         doc_id = result["doc_id"]
         doc_url = result["url"]
 
@@ -663,3 +759,17 @@ class FeishuClient:
             self.fill_oral_script(doc_id, script, video_url, video_title)
 
         return {"doc_id": doc_id, "url": doc_url}
+
+    def delete_document(self, doc_id: str) -> bool:
+        """删除飞书文档."""
+        url = f"{FEISHU_BASE_URL}/drive/v1/files/{doc_id}"
+        try:
+            resp = self._session.delete(url, headers=self._auth_header(), timeout=15)
+            if resp.status_code == 200:
+                logger.info(f"文档已删除: {doc_id}")
+                return True
+            # 已经不存在也算成功
+            return resp.status_code == 404
+        except Exception as e:
+            logger.warning(f"删除文档 {doc_id} 异常: {e}")
+            return False

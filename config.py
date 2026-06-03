@@ -1,34 +1,69 @@
 """
 集中管理所有常量、API 端点、模板 ID、Prompt 模板。
-密钥从环境变量或 st.secrets 读取，绝不硬编码。
+API 密钥以加密形式存储，运行时自动解密。
+也支持通过环境变量或 st.secrets 覆盖。
 """
 import os
 import json
 import shutil
+import base64
+import hashlib
 from pathlib import Path
 from datetime import datetime
 
 # ============================================================
-# API 密钥（优先从环境变量读取，其次尝试 streamlit secrets）
+# 内建解密工具（纯 stdlib，无外部依赖）
 # ============================================================
 
-def _get_secret(key: str, default: str = "") -> str:
-    """从环境变量或 streamlit secrets 获取密钥."""
-    # 先尝试环境变量
+_DECRYPT_PASSWORD = 'svas-2025-modelscope-deploy-key-internal'
+
+
+def _derive_key(pwd: str, salt: bytes, length: int) -> bytes:
+    """从密码派生定长密钥（SHA256 迭代）"""
+    key = hashlib.sha256(pwd.encode() + salt).digest()
+    while len(key) < length:
+        key += hashlib.sha256(key).digest()
+    return key[:length]
+
+
+def _decrypt(ciphertext: str) -> str:
+    """解密由 _encrypt 生成的密文"""
+    raw = base64.urlsafe_b64decode(ciphertext.encode())
+    salt = raw[:16]
+    encrypted = raw[16:]
+    key = _derive_key(_DECRYPT_PASSWORD, salt, len(encrypted))
+    plain_bytes = bytes(a ^ b for a, b in zip(encrypted, key))
+    return plain_bytes.decode()
+
+
+# ============================================================
+# API 密钥（环境变量 > st.secrets > 加密内置值）
+# ============================================================
+
+def _get_secret(key: str, encrypted_default: str = "") -> str:
+    """获取密钥：优先环境变量，其次 streamlit secrets，最后解密内置值."""
     val = os.environ.get(key, "")
     if val:
         return val
-    # 再尝试 streamlit secrets
     try:
         import streamlit as st
-        return st.secrets.get(key, default)
+        val = st.secrets.get(key, "")
+        if val:
+            return val
     except Exception:
-        return default
+        pass
+    if encrypted_default:
+        return _decrypt(encrypted_default)
+    return ""
 
 
-AGNES_API_KEY = _get_secret("AGNES_API_KEY", "sk-ZhwA3nuflKAXF2KkkcBJFj1oJwUk5GnyOoMTk2xkudKhX9L9")
-FEISHU_APP_ID = _get_secret("FEISHU_APP_ID", "cli_aa97347bb5f9dbd7")
-FEISHU_APP_SECRET = _get_secret("FEISHU_APP_SECRET", "UnGjpZgesVm4e0OKKkX5AEARIKiji4RC")
+AGNES_API_KEY = _get_secret("AGNES_API_KEY",
+    "GYcwcu7VJ3z9dUEDRYmPlFS6ojkjgu7iZhxP2Aj_2BA9Jo1GYcw5bqBVvtRSuSjIsOL6PNqmwHVYw2fzZUM25ndXwA==")
+FEISHU_APP_ID = _get_secret("FEISHU_APP_ID",
+    "fccXklZ-jvIo4CaTnmbEL5jNZHidZwgOCsx0DwaC6Tf3xxdL")
+FEISHU_APP_SECRET = _get_secret("FEISHU_APP_SECRET",
+    "lcuVw3ccI9NY0KUn4YJhAudEfF-REyQYnPVCYnvqf6kG903zweaA6q_P8U-mJ7rV")
+ADMIN_PASSWORD = _decrypt("RXGvYXYp3sK_lPUodoUHhArfpTwkoK1g")
 
 # ============================================================
 # API 端点
@@ -41,14 +76,40 @@ FEISHU_AUTH_URL = "https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/
 FEISHU_BASE_URL = "https://open.feishu.cn/open-apis"
 
 # ============================================================
-# 飞书资源 ID
+# 飞书资源 ID（从 requirements.json 读取，回退到内置默认值）
 # ============================================================
 
-FOLDER_TOKEN = "nodcnfKha8zoI7HaoGIBOg7D4Hh"
+def _read_req_json():
+    """直接从 requirements.json 文件读取（绕过 session state）"""
+    p = Path(__file__).parent / "config" / "requirements.json"
+    if p.exists():
+        try:
+            with open(p, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            pass
+    return {}
 
+
+def _get_folder_token():
+    tc = _read_req_json().get("模板配置", {})
+    return tc.get("文件夹Token", "nodcnfKha8zoI7HaoGIBOg7D4Hh")
+
+
+def _get_template_id(t: str):
+    tc = _read_req_json().get("模板配置", {})
+    key = "混剪模板ID" if t == "mix" else "口播模板ID"
+    defaults = {
+        "mix": "B1HtdfhjKo4g4QxgNNncCtVwnth",
+        "oral": "EbLGdZ2qYoQgpixsmQjc5EkjnNf",
+    }
+    return tc.get(key, defaults[t])
+
+
+FOLDER_TOKEN = _get_folder_token()
 TEMPLATE_IDS = {
-    "mix": "B1HtdfhjKo4g4QxgNNncCtVwnth",    # 混剪模板
-    "oral": "EbLGdZ2qYoQgpixsmQjc5EkjnNf",   # 口播模板
+    "mix": _get_template_id("mix"),
+    "oral": _get_template_id("oral"),
 }
 
 # ============================================================
@@ -61,11 +122,7 @@ def get_ffmpeg_path() -> str:
     found = shutil.which("ffmpeg")
     if found:
         return found
-    # 2. Windows 上的已知路径
-    known_windows = r"C:\Users\15769\AppData\Local\Microsoft\WinGet\Packages\Gyan.FFmpeg_Microsoft.Winget.Source_8wekyb3d8bbwe\ffmpeg-8.1.1-full_build\bin\ffmpeg.exe"
-    if os.path.exists(known_windows):
-        return known_windows
-    # 3. 尝试 imageio-ffmpeg 内置的静态 ffmpeg（跨平台，部署环境首选）
+    # 2. 尝试 imageio-ffmpeg 内置的静态 ffmpeg（跨平台，部署环境首选）
     try:
         import imageio_ffmpeg
         exe = imageio_ffmpeg.get_ffmpeg_exe()
@@ -73,7 +130,7 @@ def get_ffmpeg_path() -> str:
             return exe
     except Exception:
         pass
-    # 4. 默认回退
+    # 3. 默认回退
     return "ffmpeg"
 
 
@@ -95,6 +152,9 @@ RETRY_BACKOFF = 0.5
 
 # 并发帧分析配置
 FRAME_ANALYSIS_WORKERS = 4
+
+# 脚本生成温度（较低的值提高 JSON 结构稳定性）
+SCRIPT_GENERATION_TEMPERATURE = 0.3
 
 # ============================================================
 # 输出质量预设
@@ -175,6 +235,11 @@ _REQUIREMENTS_PATH = Path(__file__).parent / "config" / "requirements.json"
 
 # 内置 fallback 默认值（与 requirements.json 保持一致，文件丢失时使用）
 _DEFAULT_REQUIREMENTS = {
+    "模板配置": {
+        "文件夹Token": "nodcnfKha8zoI7HaoGIBOg7D4Hh",
+        "混剪模板ID": "B1HtdfhjKo4g4QxgNNncCtVwnth",
+        "口播模板ID": "EbLGdZ2qYoQgpixsmQjc5EkjnNf",
+    },
     "通用": {
         "语言": "中文",
         "返回格式": "严格的 JSON 格式，不要用 markdown 代码块包裹",
@@ -199,6 +264,14 @@ _DEFAULT_REQUIREMENTS = {
         "图片素材数量": 20,
         "图片素材格式": "每条以 emoji 开头 + 中文描述",
         "对话结构": "开场几轮抛出问题 → 中间几轮给出干货建议 → 后半段深化理解 → 结尾积极号召收尾",
+    },
+    "交付要求": {
+        "话题词数量": "3-5个",
+        "话题词格式": "中文短语，用空格或#分隔，如：职场干货 #面试技巧 #求职",
+        "【标题】": "填写脚本的标题（即脚本 JSON 中的 title 字段）",
+        "【正文】": "填写「标题 + 话题词」，格式如：标题文本 #话题1 #话题2 #话题3",
+        "【是否发布】": "保持模板默认值「未发布」，不修改",
+        "【发布类型】": "保持模板默认值「代发」，不修改",
     },
 }
 
@@ -251,6 +324,7 @@ def build_mix_prompt(synthesis: str, custom_requirements: str = "") -> str:
     req = load_requirements()
     m = req["混剪"]
     g = req["通用"]
+    d = req.get("交付要求", {})
     ad = m["广告"]
     lo, hi = m["行数范围"]
 
@@ -266,6 +340,7 @@ def build_mix_prompt(synthesis: str, custom_requirements: str = "") -> str:
 
 {{{{
   "title": "脚本主标题（{m["标题字数"]}）",
+  "hashtags": ["话题词1", "话题词2", "话题词3"],
   "rows": [
     ["口播文案第一句", "素材描述"],
     ["口播文案第二句", "素材描述"]
@@ -274,6 +349,7 @@ def build_mix_prompt(synthesis: str, custom_requirements: str = "") -> str:
 
 ## 内容要求
 - 标题：{m["标题字数"]}
+- 话题词：{d.get("话题词数量", "3-5个")}，{d.get("话题词格式", "中文短语，用#分隔")}。根据视频主题提炼，用于发布时的流量标签
 - 正文行数：{lo}-{hi} 行，根据视频内容灵活决定
 - 文案风格：{m["文案风格"]}
 - 素材列格式：{m["素材格式"]}
@@ -291,6 +367,7 @@ def build_oral_prompt(synthesis: str, custom_requirements: str = "") -> str:
     req = load_requirements()
     o = req["口播"]
     g = req["通用"]
+    d = req.get("交付要求", {})
     emotions = "、".join(o["情绪选项"])
     role_fmt = "、".join(o["角色格式"])
 
@@ -306,6 +383,7 @@ def build_oral_prompt(synthesis: str, custom_requirements: str = "") -> str:
 
 {{{{
   "title": "脚本标题（{o["标题字数"]}）",
+  "hashtags": ["话题词1", "话题词2", "话题词3"],
   "original_text": "原片完整文案（{o["原片风格"]}，{o["原片文案字数"]}）",
   "dialogs": [
     {o["角色格式"]},
@@ -319,6 +397,7 @@ def build_oral_prompt(synthesis: str, custom_requirements: str = "") -> str:
 
 ## 内容要求
 - 标题：{o["标题字数"]}
+- 话题词：{d.get("话题词数量", "3-5个")}，{d.get("话题词格式", "中文短语，用#分隔")}。根据视频主题提炼，用于发布时的流量标签
 - 对话轮数：{o["对话轮数"]} 轮 A/B 角色对话
 - 每轮格式：{role_fmt}
 - 情绪标记：{o["情绪标记说明"]}，可选情绪包括：{emotions}

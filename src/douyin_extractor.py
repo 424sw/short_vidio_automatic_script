@@ -29,6 +29,35 @@ class DouyinExtractor:
         self._session.headers.update({"User-Agent": IPHONE_UA})
 
     # ============================================================
+    # URL 提取（从分享文本中）
+    # ============================================================
+
+    @staticmethod
+    def extract_url_from_text(text: str) -> Optional[str]:
+        """从任意文本中提取第一个抖音视频链接.
+
+        用户可能直接粘贴抖音分享文本, 如:
+        "【视频】https://v.douyin.com/abc123/ 复制打开抖音，看看他的作品"
+
+        支持格式:
+        - https://v.douyin.com/xxxxx/
+        - https://www.douyin.com/video/1234567890123456789
+        - https://www.iesdouyin.com/share/video/1234567890123456789
+        - https://douyin.com/video/1234567890123456789
+        """
+        patterns = [
+            r'https?://v\.douyin\.com/[a-zA-Z0-9_\-]+/?',
+            r'https?://www\.douyin\.com/video/\d{15,25}',
+            r'https?://www\.iesdouyin\.com/share/video/\d{15,25}',
+            r'https?://douyin\.com/video/\d{15,25}',
+        ]
+        for pattern in patterns:
+            match = re.search(pattern, text)
+            if match:
+                return match.group(0).rstrip('/')
+        return None
+
+    # ============================================================
     # 视频 ID 解析
     # ============================================================
 
@@ -229,11 +258,27 @@ class DouyinExtractor:
     # ============================================================
 
     def extract(self, url: str, output_dir: str) -> dict:
-        """完整提取流程: 解析链接 → 获取信息 → 下载视频.
+        """完整提取流程: 预处理输入 → 解析链接 → 获取信息 → 下载视频.
+
+        输入可以是:
+        - 干净的抖音链接（如 https://v.douyin.com/xxx/）
+        - 包含链接的分享文本（如 "【视频】https://v.douyin.com/xxx/ 复制打开抖音..."）
 
         Returns:
             {"video_path": str, "title": str, "author": str, "video_id": str}
         """
+        # 预处理：如果输入不是以 http 开头的干净 URL，尝试从中提取 URL
+        if not url.startswith("http"):
+            extracted = self.extract_url_from_text(url)
+            if extracted:
+                logger.info(f"从分享文本中提取到链接: {extracted}")
+                url = extracted
+            else:
+                raise DouyinError(
+                    "未在输入中找到有效的抖音视频链接。\n"
+                    "请直接粘贴抖音链接，或粘贴包含链接的分享文本（如：复制打开抖音后看到的文本）。"
+                )
+
         video_id = self.extract_video_id(url)
         logger.info(f"视频 ID: {video_id}")
 

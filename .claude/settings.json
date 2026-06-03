@@ -3,7 +3,9 @@
     "allow": [
       "Bash(python -c 'import py_compile; py_compile.compile\\('\\\\''__TRACKED_VAR__'\\\\'', doraise=True\\); print\\('\\\\''__TRACKED_VAR__ OK'\\\\''\\)')",
       "Bash(streamlit run *)",
-      "Bash(python -c \"import py_compile; py_compile.compile\\('feishu_ops.py', doraise=True\\); print\\('OK'\\)\")"
+      "Bash(python -c \"import py_compile; py_compile.compile\\('feishu_ops.py', doraise=True\\); print\\('OK'\\)\")",
+      "WebFetch(domain:developer.aliyun.com)",
+      "Bash(git push *)"
     ]
   }
 }

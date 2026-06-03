@@ -1,5 +1,10 @@
-# Streamlit secrets (never commit)
+# Streamlit secrets & credentials (never commit)
 .streamlit/secrets.toml
+.streamlit/credentials.toml
+
+# Claude Code local config (may contain local paths/keys)
+.mcp.json
+.claude/settings.local.json
 
 # Python cache
 __pycache__/
@@ -9,6 +14,7 @@ __pycache__/
 # Runtime data (generated at runtime, not source code)
 data/downloads/
 data/frames/
+data/sessions/
 data/*.mp4
 data/*.wav
 data/*.jpg
