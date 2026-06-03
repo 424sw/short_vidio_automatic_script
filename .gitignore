@@ -2,9 +2,10 @@
 .streamlit/secrets.toml
 .streamlit/credentials.toml
 
-# Claude Code local config (may contain local paths/keys)
+# Claude Code local config
 .mcp.json
 .claude/settings.local.json
+.claude/settings.json
 
 # Python cache
 __pycache__/
