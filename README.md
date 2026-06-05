@@ -14,21 +14,12 @@ deployspec:
 ```bash
 pip install -r requirements.txt
 
-# 用户界面（端口 8501）
 streamlit run app.py
-
-# 管理后台（端口 8502）
-streamlit run admin.py --server.port 8502 --server.headless true
 ```
-
-两个可以同时运行，互不影响。
 
 ## 界面说明
 
-| 界面 | 地址 | 用途 |
-|------|------|------|
-| 用户界面 | `http://localhost:8501` | 粘贴抖音链接 → 生成脚本 → 获得飞书文档 |
-| 管理后台 | `http://localhost:8502` | 用大白话修改脚本规则，无需懂编程 |
+管理后台已集成在 `app.py` 中：打开用户界面，点击头部「管理」→ 输入密码进入后台。
 
 ## 管理后台用法
 
@@ -73,8 +64,7 @@ AI 会自动翻译成配置变更，你确认后立刻生效。
 ## 项目结构
 
 ```
-├── app.py              # 用户界面（Streamlit）
-├── admin.py            # 管理后台（自然语言改配置）
+├── app.py              # 用户界面 + 管理后台（Streamlit）
 ├── config.py           # 配置、密钥、Prompt
 ├── src/
 │   ├── douyin_extractor.py   # 抖音链接解析

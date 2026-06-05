@@ -7,7 +7,16 @@
 ## 快速开始
 
 ```bash
+# 1. 安装 Python 依赖
 pip install -r requirements.txt
+
+# 2. 下载语音识别模型到本地（一次性，~70MB）
+#    国内网络建议先设置镜像：
+#    set HF_ENDPOINT=https://hf-mirror.com
+#    然后运行：
+python setup_models.py
+
+# 3. 启动应用
 streamlit run app.py
 # 访问 http://localhost:8501
 ```
@@ -124,7 +133,7 @@ st.file_uploader("", label_visibility="collapsed", ...)
 | `app.py` | Streamlit UI、session state、4步管道、管理后台嵌入、双锚点防ghost UI、进度分步展示 |
 | `config.py` | AES加密密钥、API端点、Prompt工厂、质量预设、`get_ffmpeg_path()`、热加载飞书资源ID |
 | `douyin_extractor.py` | 正则从分享文本提取URL（多格式）、短链跟踪、视频ID解析、FFmpeg/requests双通道下载 |
-| `video_analyzer.py` | FFmpeg抽帧(按质量级fps)、音频提取、faster-whisper转录、并发AI vision逐帧分析、综合报告 |
+| `video_analyzer.py` | FFmpeg抽帧(fps+mpdecimate去重)、音频提取、faster-whisper转录(本地模型)、批量AI vision分析(一次调用)、综合报告 |
 | `script_generator.py` | AI生成结构化JSON（含hashtags）、结构/内容双重校验+重试反馈、多脚本trigram去重、图片要求提取、类型自动检测 |
 | `feishu_ops.py` | OAuth认证、模板复制、公开权限、Block get/update/insert_row、表格行列式填充、交付字段替换、文档删除 |
 | `session_manager.py` | SHA256(url)→session key、state.json磁盘checkpoint、24h过期清理 |
@@ -147,13 +156,15 @@ config.py Prompt构建函数    ← 合并默认值 → 最终 Prompt
 
 ## 输出质量预设
 
-质量控制三个维度：`fps`（每秒抽帧数）、`max_frames`（最大帧数）、`workers`（并发数）。
+质量控制维度：`max_frames`（抽帧上限）。所有帧通过单次 API 批量调用分析。
 
-| 质量 | fps | max_frames | workers | 预计耗时 |
-|------|-----|-----------|---------|---------|
-| 🚀 快速 | 1 | 60 | 4 | 约 1-2 分钟 |
-| ⚖️ 标准 | 2 | 150 | 4 | 约 3-5 分钟 |
-| 🎯 精细 | 3 | 300 | 3 | 约 6-10 分钟 |
+抽帧使用 `fps=2 + mpdecimate` 去重，只保留画面变化处的关键帧。
+
+| 质量 | max_frames | 预计耗时 |
+|------|-----------|---------|
+| 快速 | 15 | 约 30-60 秒 |
+| 标准 | 30 | 约 1-2 分钟 |
+| 精细 | 60 | 约 2-4 分钟 |
 
 进度面板中每步的预计时间也按质量分级（`_STEP_TIMES`），确保单步最大预估 ≤ 总预计。
 
