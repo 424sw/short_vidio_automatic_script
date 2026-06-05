@@ -184,8 +184,14 @@ class FeishuClient:
         return all_blocks
 
     def update_text_block(self, doc_id: str, block_id: str, content: str,
-                          bold: bool = False, background_color: int = None) -> dict:
-        """更新文本 block 的内容."""
+                          bold: bool = False, background_color: int = None,
+                          multiline: bool = False) -> dict:
+        """更新文本 block 的内容。
+
+        Args:
+            multiline: True 时将 \\n 拆分为多个 text_run element（用于普通文本块换行）。
+                       表格单元格内不支持多 element，用单 text_run 包含换行符。
+        """
         style = {
             "bold": bold,
             "inline_code": False,
@@ -196,17 +202,34 @@ class FeishuClient:
         if background_color is not None:
             style["background_color"] = background_color
 
-        body = {
-            "update_text_elements": {
-                "elements": [{
+        if multiline:
+            # 非表格场景：按 \\n 拆分为多个 element
+            lines = content.split("\n")
+            elements = []
+            for i, line in enumerate(lines):
+                elements.append({
                     "text_run": {
-                        "content": content,
+                        "content": line,
                         "text_element_style": style,
                     }
-                }]
-            }
-        }
+                })
+                if i < len(lines) - 1:
+                    elements.append({
+                        "text_run": {
+                            "content": "\n",
+                            "text_element_style": style,
+                        }
+                    })
+        else:
+            # 表格单元格：单 text_run，\\n 保留在 content 内
+            elements = [{
+                "text_run": {
+                    "content": content,
+                    "text_element_style": style,
+                }
+            }]
 
+        body = {"update_text_elements": {"elements": elements}}
         return self._request(
             "PATCH",
             f"{FEISHU_BASE_URL}/docx/v1/documents/{doc_id}/blocks/{block_id}",
@@ -385,7 +408,12 @@ class FeishuClient:
                             break
 
         if title_block:
-            self.update_text_block(doc_id, title_block["block_id"], script.get("title", video_title))
+            mix_title = script.get("title", video_title)
+            mix_hashtags = script.get("hashtags", [])
+            if mix_hashtags:
+                mix_title = mix_title + " " + " ".join(
+                    f"#{t.strip('#')}" for t in mix_hashtags)
+            self.update_text_block(doc_id, title_block["block_id"], mix_title)
 
         # --- Step 4: 填充表格 ---
         table_block = next((b for b in page_children if b["block_type"] == 31), None)
@@ -397,7 +425,12 @@ class FeishuClient:
         # 重新获取（表格填充可能插入了行），然后更新封面标题
         blocks = self.get_blocks(doc_id)
         block_map = {b["block_id"]: b for b in blocks}
-        self._update_cover_title_bullet(doc_id, blocks, block_map, title=script.get("title", ""))
+        cover_title = script.get("title", video_title)
+        cover_hashtags = script.get("hashtags", [])
+        if cover_hashtags:
+            cover_title = cover_title + " " + " ".join(
+                f"#{t.strip('#')}" for t in cover_hashtags)
+        self._update_cover_title_bullet(doc_id, blocks, block_map, title=cover_title)
         # 更新交付要求中的【标题】和【正文】字段
         self._update_delivery_fields(doc_id, blocks, block_map,
                                      title=script.get("title", ""),
@@ -445,7 +478,9 @@ class FeishuClient:
         logger.info(f"混剪表格: {len(cells)} 个cells, {current_row_count} 行")
 
         # 跳过表头行 (row 0), 从 row 1 开始填数据
-        for i, (content_text, material_text) in enumerate(rows_data):
+        for i, row in enumerate(rows_data):
+            content_text = str(row[0]) if row else ""
+            material_text = str(row[1]) if len(row) >= 2 else ""
             row = i + 1  # 数据行从第1行开始（第0行是表头）
             col0_idx = row * C + 0
             col1_idx = row * C + 1
@@ -454,13 +489,15 @@ class FeishuClient:
                 cell0 = cells[col0_idx]
                 child0 = cell0.get("children", [""])[0] if cell0 else None
                 if child0:
-                    self.update_text_block(doc_id, child0, content_text)
+                    self.update_text_block(doc_id, child0, content_text,
+                                          multiline=True)
 
             if col1_idx < len(cells):
                 cell1 = cells[col1_idx]
                 child1 = cell1.get("children", [""])[0] if cell1 else None
                 if child1:
-                    self.update_text_block(doc_id, child1, material_text)
+                    self.update_text_block(doc_id, child1, material_text,
+                                          multiline=True)
 
             time.sleep(0.15)
 
@@ -500,11 +537,16 @@ class FeishuClient:
                 self.update_text_block(doc_id, link_block_id, f"参考视频：{video_url}")
 
         # --- Step 3: 写入标题到嵌入表格 ---
+        oral_title = script.get("title", video_title)
+        oral_hashtags = script.get("hashtags", [])
+        full_oral_title = oral_title + " " + " ".join(
+            f"#{t.strip('#')}" for t in oral_hashtags) if oral_hashtags else oral_title
+
         sheet_block = next((b for b in page_children if b["block_type"] == 30), None)
         if sheet_block:
             sheet_token = sheet_block.get("sheet", {}).get("token", "")
             if sheet_token:
-                self.update_sheet_title(sheet_token, script.get("title", video_title))
+                self.update_sheet_title(sheet_token, full_oral_title)
 
         # --- Step 4: 填充三列表格 ---
         table_block = next((b for b in page_children if b["block_type"] == 31), None)
@@ -514,10 +556,10 @@ class FeishuClient:
         self._fill_oral_table(doc_id, table_block, script, blocks, block_map)
 
         # --- Step 5: 更新封面标题 + 交付要求字段 ---
-        self._update_cover_title_bullet(doc_id, blocks, block_map, title=script.get("title", ""))
+        self._update_cover_title_bullet(doc_id, blocks, block_map, title=full_oral_title)
         self._update_delivery_fields(doc_id, blocks, block_map,
-                                     title=script.get("title", ""),
-                                     hashtags=script.get("hashtags", []))
+                                     title=oral_title,
+                                     hashtags=oral_hashtags)
 
         logger.info("口播模板填充完成")
         return "oral"
@@ -533,17 +575,10 @@ class FeishuClient:
         images = script.get("images", [])
         original_text = script.get("original_text", "")
 
-        C = 3  # 口播表格列数
-
         cell_ids = table_block.get("children", [])
         cells = [block_map.get(cid) for cid in cell_ids if cid in block_map]
 
         logger.info(f"口播表格: {len(cells)} 个cells")
-
-        # 数据行在 row 1（row 0 = 表头）
-        # cell(r=1, c=0) = children[1*3+0] = children[3]
-        # cell(r=1, c=1) = children[1*3+1] = children[4]
-        # cell(r=1, c=2) = children[1*3+2] = children[5]
 
         if len(cells) < 6:
             logger.warning(f"口播表格 cells 不足，期望6个，实际{len(cells)}个")
@@ -553,7 +588,7 @@ class FeishuClient:
         cell0 = cells[3]
         child0 = cell0.get("children", [""])[0] if cell0 else None
         if child0:
-            self.update_text_block(doc_id, child0, original_text)
+            self.update_text_block(doc_id, child0, original_text, multiline=True)
 
         # Col 1: 正式口播脚本 (cell at row=1, col=1)
         cell1 = cells[4]
@@ -562,7 +597,7 @@ class FeishuClient:
             dialog_text = "\n\n".join(
                 f"**{d[0]}**：{d[1]}" for d in dialogs
             )
-            self.update_text_block(doc_id, child1, dialog_text)
+            self.update_text_block(doc_id, child1, dialog_text, multiline=True)
 
         # Col 2: 图片素材 (cell at row=1, col=2)
         cell2 = cells[5]
@@ -571,7 +606,7 @@ class FeishuClient:
             images_text = "\n".join(
                 f"{i+1}. {img}" for i, img in enumerate(images)
             )
-            self.update_text_block(doc_id, child2, images_text)
+            self.update_text_block(doc_id, child2, images_text, multiline=True)
 
         logger.info("口播表格填充完成")
 
@@ -647,38 +682,35 @@ class FeishuClient:
     def _update_delivery_fields(self, doc_id: str, blocks: list,
                                  block_map: dict, title: str,
                                  hashtags: list = None):
-        """更新交付要求中的【标题】和【正文】字段.
+        """更新交付要求中的标题和话题词字段.
 
-        【标题】→ 脚本标题
-        【正文】→ 标题 + 话题词（如：标题文本 #话题1 #话题2）
-        【是否发布】和【发布类型】保持模板默认值不变。
+        两阶段匹配：
+          1. 精确搜索含【标题】/【正文】标记的块
+          2. 回退：搜索含"标题"文本的块 + 位置特征判断
         """
         if hashtags is None:
             hashtags = []
 
-        # 构建话题词字符串
         hashtag_str = " ".join(f"#{t.strip('#')}" for t in hashtags) if hashtags else ""
+        body_text = f"{title} {hashtag_str}" if hashtag_str else title
 
-        # 构建【正文】内容：标题 + 话题词
-        if hashtag_str:
-            body_text = f"{title} {hashtag_str}"
-        else:
-            body_text = title
-
+        # --- 阶段1: 精确匹配【】标记 ---
+        matched = False
         for block in blocks:
-            if block["block_type"] != 2:  # text block
+            bt = block.get("block_type", 0)
+            if bt not in (2, 12):
                 continue
 
-            elements = block.get("text", {}).get("elements", [])
+            key = "text" if bt == 2 else "bullet"
+            elements = block.get(key, {}).get("elements", [])
             full_text = "".join(e.get("text_run", {}).get("content", "") for e in elements)
 
-            # 找到包含【标题】和【正文】的文本块
-            if "【标题】" not in full_text or "【正文】" not in full_text:
+            if "【标题】" not in full_text and "【正文】" not in full_text:
                 continue
+            matched = True
 
             new_elements = []
             for e in elements:
-                # 保留非 text_run 元素（如 mention_user 等）不变
                 if "text_run" not in e:
                     new_elements.append(e)
                     continue
@@ -687,52 +719,146 @@ class FeishuClient:
                 content = text_run.get("content", "")
                 style = text_run.get("text_element_style", {})
 
-                # 构建基础 style（不含 background_color，除非原值存在且非 0）
                 base_style = {
                     "bold": style.get("bold", False),
-                    "inline_code": False,
-                    "italic": False,
-                    "strikethrough": False,
-                    "underline": False,
+                    "inline_code": False, "italic": False,
+                    "strikethrough": False, "underline": False,
                 }
                 bg = style.get("background_color")
                 if bg is not None and bg != 0:
                     base_style["background_color"] = bg
 
-                # 替换【标题】行
-                if "【标题】" in content:
-                    new_content = content.replace("填写标题即可", title)
-                    new_elements.append({
-                        "text_run": {
-                            "content": new_content,
-                            "text_element_style": base_style,
-                        }
-                    })
-                # 替换【正文】行
-                elif "【正文】" in content:
-                    new_content = content.replace(
-                        "填写标题➕话题词即可", body_text
-                    )
-                    new_elements.append({
-                        "text_run": {
-                            "content": new_content,
-                            "text_element_style": base_style,
-                        }
-                    })
-                else:
-                    # 【是否发布】【发布类型】等保持不变
-                    new_elements.append({"text_run": text_run})
+                # 用正则替换标记后的旧内容（两标记在同一 element 内）
+                content = re.sub(
+                    r'(【标题】：).*?(?=【|\n)',
+                    lambda m: m.group(1) + title,
+                    content, count=1)
+                content = re.sub(
+                    r'(【正文】：).*?(?=【|\n|$)',
+                    lambda m: m.group(1) + body_text,
+                    content, count=1)
 
-            body = {"update_text_elements": {"elements": new_elements}}
+                new_elements.append({
+                    "text_run": {
+                        "content": content,
+                        "text_element_style": base_style,
+                    }
+                })
+
             self._request(
                 "PATCH",
                 f"{FEISHU_BASE_URL}/docx/v1/documents/{doc_id}/blocks/{block['block_id']}",
-                json=body,
+                json={"update_text_elements": {"elements": new_elements}},
             )
-            logger.info(f"已更新交付要求字段: 标题={title}, 正文={body_text}")
+            logger.info(f"已更新交付要求字段（精确）: 标题={title}, 正文={body_text}")
+
+        if matched:
             return
 
-        logger.warning("未找到【标题】【正文】字段块，跳过更新")
+        # --- 阶段2: 回退匹配 — 扫描全部 block（含嵌套）用宽模式匹配 ---
+        title_patterns = ["标题：", "标题:", "【标题】", "【标题", "标题】",
+                          "填写标题", "title", "标题("]
+        body_patterns = ["正文：", "正文:", "【正文】", "【正文", "正文】",
+                         "填写标题", "话题词", "xxxxx", "填写正文",
+                         "标题➕话题词", "标题 + 话题", "填写话题"]
+
+        title_target = None
+        body_target = None
+
+        # 从后往前扫描全部 block（交付字段在尾部）
+        for block in reversed(blocks):
+            bt = block.get("block_type", 0)
+            if bt not in (2, 12):
+                continue
+            key = "text" if bt == 2 else "bullet"
+            elements = block.get(key, {}).get("elements", [])
+            full_text = "".join(e.get("text_run", {}).get("content", "") for e in elements)
+
+            if not title_target:
+                for pat in title_patterns:
+                    if pat in full_text:
+                        title_target = block
+                        logger.info("回退匹配-标题(pat=%s): %s", pat, full_text[:80])
+                        break
+            if not body_target:
+                for pat in body_patterns:
+                    if pat in full_text:
+                        body_target = block
+                        logger.info("回退匹配-正文(pat=%s): %s", pat, full_text[:80])
+                        break
+            if title_target and body_target:
+                break
+
+        if not title_target and not body_target:
+            logger.warning("两阶段均未找到交付字段，dump 全部 text/bullet block:")
+            for i, blk in enumerate(blocks):
+                bt = blk.get("block_type", 0)
+                if bt in (2, 12):
+                    key = "text" if bt == 2 else "bullet"
+                    full_text = "".join(
+                        e.get("text_run", {}).get("content", "")
+                        for e in blk.get(key, {}).get("elements", []))
+                    if full_text.strip():
+                        logger.warning("  [%d] type=%d: %s", i, bt, full_text[:120])
+            return
+
+        # --- 辅助：用位置替换的方式更新一个 block ---
+        def _replace_after_marker(block, markers, new_val):
+            bt = block.get("block_type", 0)
+            key = "text" if bt == 2 else "bullet"
+            elements = block.get(key, {}).get("elements", [])
+            new_elements = []
+            replaced = False
+            for e in elements:
+                if "text_run" not in e:
+                    new_elements.append(e)
+                    continue
+                text_run = e.get("text_run", {})
+                content = text_run.get("content", "")
+                style = text_run.get("text_element_style", {})
+                base_style = {
+                    "bold": style.get("bold", False),
+                    "inline_code": False, "italic": False,
+                    "strikethrough": False, "underline": False,
+                }
+                bg = style.get("background_color")
+                if bg is not None and bg != 0:
+                    base_style["background_color"] = bg
+                for mk in markers:
+                    if mk in content:
+                        idx = content.index(mk) + len(mk)
+                        content = content[:idx] + new_val
+                        replaced = True
+                        break
+                new_elements.append({
+                    "text_run": {
+                        "content": content,
+                        "text_element_style": base_style,
+                    }
+                })
+            if replaced:
+                self._request(
+                    "PATCH",
+                    f"{FEISHU_BASE_URL}/docx/v1/documents/{doc_id}/blocks/{block['block_id']}",
+                    json={"update_text_elements": {"elements": new_elements}},
+                )
+
+        # 写入标题（替换各种可能格式）
+        title_markers = ["标题：", "标题:", "【标题】", "【标题",
+                         "标题】", "标题("]
+        if title_target:
+            _replace_after_marker(title_target, title_markers, title)
+            logger.info("已更新交付标题（回退）: %s", title)
+
+        # 写入正文
+        body_markers = ["正文：", "正文:", "【正文】", "【正文",
+                        "正文】", "话题词：", "话题词:", "话题：", "话题:"]
+        if body_target:
+            _replace_after_marker(body_target, body_markers, body_text)
+            logger.info("已更新交付正文（回退）: %s", body_text)
+
+        if not title_target and not body_target:
+            logger.warning("两阶段均未找到交付字段")
 
     # ============================================================
     # 完整流程

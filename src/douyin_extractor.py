@@ -79,8 +79,9 @@ class DouyinExtractor:
                 resp = requests.head(url, allow_redirects=True, timeout=10,
                                      headers={"User-Agent": IPHONE_UA})
                 url = resp.url
-            except Exception:
-                pass
+                logger.info("短链接已跟踪: %s", url[:80])
+            except Exception as e:
+                logger.warning("短链接重定向失败: %s，尝试直接解析", e)
 
         # 模式 1: /video/1234567890123456789
         match = re.search(r'/video/(\d{15,25})', url)
@@ -130,7 +131,7 @@ class DouyinExtractor:
 
         # 提取 window._ROUTER_DATA
         match = re.search(
-            r'window\._ROUTER_DATA\s*=\s*(\{.*?\});?\s*</script>',
+            r'window\._ROUTER_DATA\s*=\s*(\{.*\});?\s*</script>',
             html, re.DOTALL
         )
         if not match:
@@ -141,7 +142,20 @@ class DouyinExtractor:
             )
 
         try:
-            router_data = json.loads(match.group(1))
+            raw_json = match.group(1)
+            # 如果贪婪匹配抓到太多内容，向后收缩到最后一个完整 JSON
+            stack = 0
+            last_valid = 0
+            for i, c in enumerate(raw_json):
+                if c == '{': stack += 1
+                elif c == '}':
+                    stack -= 1
+                    if stack == 0:
+                        last_valid = i + 1
+                        break
+            if last_valid > 0:
+                raw_json = raw_json[:last_valid]
+            router_data = json.loads(raw_json)
         except json.JSONDecodeError as e:
             raise DouyinError(f"页面数据解析失败: {e}")
 
@@ -185,8 +199,16 @@ class DouyinExtractor:
         if not url_list:
             raise DouyinError("未找到视频下载地址")
 
-        # 去水印：playwm → play
-        video_url = url_list[0].replace("playwm", "play")
+        # 去水印：尝试多种已知模式
+        video_url = url_list[0]
+        for wm, clean in [("playwm", "play"), ("-wm", ""), ("_wm", "")]:
+            if wm in video_url:
+                video_url = video_url.replace(wm, clean)
+                break
+        if "playwm" in url_list[0] and "playwm" not in video_url:
+            logger.info("水印已处理: %s → %s", url_list[0][:80], video_url[:80])
+        elif "playwm" in url_list[0]:
+            logger.warning("水印替换可能无效，URL 仍含 playwm: %s", video_url[:80])
 
         desc = item_list[0].get("desc", "Untitled")
         author_info = item_list[0].get("author", {})

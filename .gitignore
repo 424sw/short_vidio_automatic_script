@@ -12,13 +12,12 @@ __pycache__/
 *.pyc
 *.pyo
 
-# Pre-downloaded ML models (run setup_models.py to populate)
-models/
+# Pre-downloaded ML models (run tools/setup_models.py to populate)
+tools/models/
 
 # Runtime data (generated at runtime, not source code)
 data/downloads/
 data/frames/
-data/sessions/
 data/*.mp4
 data/*.wav
 data/*.jpg

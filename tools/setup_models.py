@@ -5,7 +5,7 @@
 国内网络下建议先设置镜像：set HF_ENDPOINT=https://hf-mirror.com
 
 用法：
-    python setup_models.py
+    python tools/setup_models.py
 """
 
 import os
@@ -99,13 +99,13 @@ def main():
         print("1. 浏览器打开: https://hf-mirror.com/Systran/faster-whisper-tiny/tree/main")
         print("   或: https://huggingface.co/Systran/faster-whisper-tiny/tree/main")
         print()
-        print("2. 下载以下文件到 models/faster-whisper-tiny/:")
+        print("2. 下载以下文件到 tools/models/faster-whisper-tiny/:")
         print("   - config.json")
         print("   - model.bin")
         print("   - tokenizer.json")
         print("   - preprocessor_config.json")
         print()
-        print("3. 重新运行: python setup_models.py")
+        print("3. 重新运行: python tools/setup_models.py")
         print()
         return 1
 
