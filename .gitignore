@@ -15,16 +15,16 @@ __pycache__/
 # Pre-downloaded ML models (run tools/setup_models.py to populate)
 tools/models/
 
-# Runtime data (generated at runtime, not source code)
-data/downloads/
-data/frames/
+# Runtime data — all session subdirs + any files under data/
+# Session dirs like data/<session_id>/ contain frames, audio, downloads, etc.
+data/*/
 data/*.mp4
 data/*.wav
 data/*.jpg
 data/*.png
 data/*.json
 
-# Runtime lock/queue files (concurrency control, never commit)
+# Runtime lock/queue/marker files (concurrency control, never commit)
 data/.running
 data/.queue
 data/.cleanup_done
