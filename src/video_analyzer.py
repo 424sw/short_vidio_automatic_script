@@ -168,7 +168,7 @@ def _transcribe_audio(audio_path: str) -> str:
                                            beam_size=5, vad_filter=True)
         text = "".join(s.text.strip() for s in segments)
         if text:
-            return f"音频时长: {dur:.1f}秒\n音频转录:\n{text}\n语言: {info.language}"
+            return f"音频时长: {dur:.1f}秒\n音频转录:\n{text}\n语言: {info.language}\n⚠️ 若转录为繁体，请在下游 AI 步骤中要求转换为简体中文"
     except ImportError:
         logger.warning("faster-whisper 未安装")
     except Exception as e:

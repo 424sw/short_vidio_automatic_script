@@ -20,22 +20,36 @@ class ScriptGenerator:
                              timeout=120.0)
 
     def generate(self, synthesis: str, script_type: str = "mix",
-                 video_title: str = "") -> dict:
+                 video_title: str = "", audio_transcript: str = "") -> dict:
         """生成脚本。"""
         if script_type == "oral":
-            prompt = build_oral_prompt(synthesis)
+            prompt = build_oral_prompt(synthesis, audio_transcript=audio_transcript)
         else:
-            prompt = build_mix_prompt(synthesis)
+            prompt = build_mix_prompt(synthesis, audio_transcript=audio_transcript)
 
         type_label = "口播" if script_type == "oral" else "混剪"
         src = f"（来源: {video_title}）" if video_title else ""
         logger.info("生成%s脚本%s...", type_label, src)
 
-        raw = self._call_api(prompt)
-        script = self._parse_json(raw, retry_prompt=prompt)
-        self._validate(script, script_type)
-        logger.info("%s脚本生成成功", type_label)
-        return script
+        max_retries = 2
+        last_error = None
+        for attempt in range(max_retries + 1):
+            raw = self._call_api(prompt)
+            script = self._parse_json(raw, retry_prompt=prompt)
+            try:
+                self._validate(script, script_type)
+                logger.info("%s脚本生成成功（第 %d 次）", type_label, attempt + 1)
+                return script
+            except ScriptGeneratorError as e:
+                last_error = e
+                if attempt < max_retries:
+                    logger.warning("校验失败（第 %d/%d 次）: %s，重试中...", attempt + 1, max_retries + 1, e)
+                    prompt = (
+                        f"⚠️ 上一次生成被拒绝，原因：{e}\n"
+                        f"请修正上述问题，重新输出完整的纯 JSON。\n\n"
+                        + prompt
+                    )
+        raise last_error
 
     def _call_api(self, prompt: str) -> str:
         """调用 AI API，返回原始文本."""
@@ -85,11 +99,11 @@ class ScriptGenerator:
         if "hashtags" not in script or not isinstance(script.get("hashtags"), list):
             raise ScriptGeneratorError("缺少 hashtags 数组")
 
-        # 清理 + 校验话题词数量（交付要求 3-5 个）
+        # 清理 + 校验话题词数量（交付要求 4-5 个）
         hashtags = [t for t in script["hashtags"] if isinstance(t, str) and t.strip()]
-        if len(hashtags) < 3:
+        if len(hashtags) < 4:
             raise ScriptGeneratorError(
-                f"话题词不足: {len(hashtags)} 个（至少需要 3 个）。"
+                f"话题词不足: {len(hashtags)} 个（至少需要 4 个）。"
                 f"请确保生成的话题词为中文短语，如：职场干货、面试技巧、求职")
         script["hashtags"] = hashtags
 

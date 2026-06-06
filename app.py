@@ -4,9 +4,20 @@
 """
 import time
 import logging
+import importlib
 from pathlib import Path
 
 import streamlit as st
+
+import src.douyin_extractor
+import src.video_analyzer
+import src.script_generator
+import src.feishu_ops
+
+# Streamlit 热重载不会刷新已导入的 src/ 模块 — 每次 rerun 强制 reload
+for _mod in [src.douyin_extractor, src.video_analyzer,
+             src.script_generator, src.feishu_ops]:
+    importlib.reload(_mod)
 
 from src.douyin_extractor import DouyinExtractor, DouyinError
 from src.video_analyzer import VideoAnalyzer, VideoAnalysisError
@@ -59,6 +70,7 @@ DEFAULTS = {
     "video_author": "",
     "video_path": "",
     "synthesis": "",
+    "audio_transcript": "",
     "script_json": None,
     "doc_url": "",
     "error": None,
@@ -78,6 +90,15 @@ def clear_run():
 # 输入面板
 # ============================================================
 def render_input_panel():
+    # 显示上一次运行的错误（如有）— 仅显示错误，不混杂输入表单
+    if st.session_state.error:
+        st.error(st.session_state.error)
+        st.info("请检查视频链接是否有效，或尝试更换视频后重试。")
+        if st.button("清除错误，重新开始", type="primary", use_container_width=True):
+            clear_run()
+            st.rerun()
+        return
+
     video_url = st.text_input(
         "抖音视频链接",
         placeholder="在此处直接粘贴视频链接",
@@ -100,6 +121,13 @@ def render_input_panel():
 # ============================================================
 def render_result_panel():
     st.success("全部完成")
+    # 显示错误（如有）
+    if st.session_state.error:
+        st.error(st.session_state.error)
+        if st.button("清除错误，重新开始", use_container_width=True):
+            clear_run()
+            st.rerun()
+
     doc_url = st.session_state.get("doc_url", "")
     if doc_url:
         script = st.session_state.get("script_json") or {}
@@ -119,16 +147,63 @@ def render_result_panel():
 
 
 # ============================================================
-# 错误
+# 进度面板
 # ============================================================
 
-def render_error():
-    if not st.session_state.error:
-        return
-    st.error(st.session_state.error)
-    st.info("请检查视频链接是否有效，或尝试更换视频后重试。")
-    if st.button("清除错误，重新开始", use_container_width=True):
-        clear_run()
+STEP_LABELS = {
+    1: ("① 提取视频", "正在下载抖音视频并提取标题/作者..."),
+    2: ("② AI 分析", "正在抽帧、语音转文字、AI 综合分析..."),
+    3: ("③ 生成脚本", "正在根据分析结果生成混剪脚本..."),
+    4: ("④ 飞书文档", "正在创建飞书文档并填充脚本内容..."),
+}
+
+STEP_ESTIMATES = {
+    1: "约 15-30 秒",
+    2: "约 30-90 秒",
+    3: "约 10-25 秒",
+    4: "约 5-12 秒",
+}
+
+def render_progress_panel():
+    step = st.session_state.step
+    label, desc = STEP_LABELS.get(step, ("处理中...", ""))
+    estimate = STEP_ESTIMATES.get(step, "")
+
+    # 进度条
+    st.progress((step - 1) / 4, text=f"步骤 {step}/4")
+
+    # 步骤标题
+    st.markdown(f"<h3 style='text-align:center; margin:0.75rem 0 0.25rem 0;'>{label}</h3>", unsafe_allow_html=True)
+    status_placeholder = st.empty()
+    status_placeholder.info(st.session_state.status_msg or desc)
+
+    # 自定义 spinner 行：左文字 ⏳ 右预计时间
+    spinner_placeholder = st.empty()
+    spinner_placeholder.markdown(f"""
+    <div style="display:flex; align-items:center; justify-content:space-between; padding:8px 4px;">
+        <div style="display:flex; align-items:center; gap:8px;">
+            <span style="font-size:1.1rem; animation: spin 1.2s linear infinite; display:inline-block;">⏳</span>
+            <span style="color:#555; font-size:0.95rem;">请稍候...</span>
+        </div>
+        <span style="color:#999; font-size:0.85rem;">⏱ {estimate}</span>
+    </div>
+    """, unsafe_allow_html=True)
+
+    # 执行当前步骤
+    if step == 1:
+        step1_extract()
+    elif step == 2:
+        step2_analyze()
+    elif step == 3:
+        step3_generate()
+    elif step == 4:
+        step4_feishu()
+
+    # 清理 spinner 占位
+    spinner_placeholder.empty()
+
+    # 步骤完成 → 推进
+    if st.session_state.step != step:
         st.rerun()
 
 
@@ -178,6 +253,7 @@ def step2_analyze():
         audio_text = result.get("audio_transcript", "")
         audio_note = "（含语音转文字）" if audio_text and "转录" in audio_text else ""
         st.session_state.synthesis = result["synthesis"]
+        st.session_state.audio_transcript = audio_text
         st.session_state.step = 3
         st.session_state.status_msg = f"分析完成: {frame_count} 帧 {audio_note}"
         logger.info(f"AI 分析完成: {frame_count} 帧")
@@ -203,7 +279,16 @@ def step3_generate():
 
     try:
         gen = ScriptGenerator()
-        script = gen.generate(synthesis, script_type="mix", video_title=video_title)
+        audio_transcript = st.session_state.get("audio_transcript", "")
+        # Whisper 默认输出繁体，转为简体中文
+        if audio_transcript:
+            try:
+                from zhconv import convert
+                audio_transcript = convert(audio_transcript, "zh-cn")
+            except ImportError:
+                pass
+        script = gen.generate(synthesis, script_type="oral", video_title=video_title,
+                              audio_transcript=audio_transcript)
         st.session_state.script_json = script
         st.session_state.step = 4
         st.session_state.status_msg = "脚本已生成"
@@ -224,7 +309,7 @@ def step4_feishu():
     try:
         client = _get_feishu_client()
         result = client.create_and_fill(
-            "mix", script,
+            "oral", script,
             st.session_state.video_url, st.session_state.video_title,
             seq=1,
         )
@@ -262,6 +347,7 @@ def main():
     [data-testid="stToolbar"] { display: none !important; }
     footer { display: none !important; }
     .stMarkdown h1 a, .stMarkdown h2 a, .stMarkdown h3 a { display: none; }
+    @keyframes spin { from { transform:rotate(0deg); } to { transform:rotate(360deg); } }
     </style>
     """, unsafe_allow_html=True)
 
@@ -276,41 +362,14 @@ def main():
 
     st.divider()
 
-    if st.session_state.step == 0:
+    step = st.session_state.step
+
+    if step == 0:
         render_input_panel()
-
-    if st.session_state.step == 5:
+    elif step in (1, 2, 3, 4):
+        render_progress_panel()
+    elif step == 5:
         render_result_panel()
-
-    if st.session_state.step == 1:
-        with st.status("正在处理...", expanded=True):
-            step1_extract()
-            if st.session_state.step == 2:
-                st.rerun()
-
-    elif st.session_state.step == 2:
-        with st.status("正在处理...", expanded=True):
-            step2_analyze()
-            if st.session_state.step == 3:
-                st.rerun()
-
-    elif st.session_state.step == 3:
-        with st.status("正在处理...", expanded=True):
-            step3_generate()
-            if st.session_state.step == 4:
-                st.rerun()
-            elif st.session_state.step == 0:
-                st.rerun()  # 失败后刷新显示错误
-
-    elif st.session_state.step == 4:
-        with st.status("正在处理...", expanded=True):
-            step4_feishu()
-            if st.session_state.step == 5:
-                st.rerun()
-            elif st.session_state.step == 0:
-                st.rerun()  # 失败后刷新显示错误
-
-    render_error()
 
 
 if __name__ == "__main__":

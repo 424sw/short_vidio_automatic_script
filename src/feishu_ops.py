@@ -3,6 +3,7 @@
 """
 import time
 import json
+import re
 import uuid
 import logging
 import requests
@@ -590,14 +591,18 @@ class FeishuClient:
         if child0:
             self.update_text_block(doc_id, child0, original_text, multiline=True)
 
-        # Col 1: 正式口播脚本 (cell at row=1, col=1)
+        # Col 1: 正式口播脚本 — 【...】标记黄色高亮
         cell1 = cells[4]
         child1 = cell1.get("children", [""])[0] if cell1 else None
         if child1:
-            dialog_text = "\n\n".join(
-                f"**{d[0]}**：{d[1]}" for d in dialogs
+            elements = self._build_oral_dialog_elements(dialogs)
+            body = {"update_text_elements": {"elements": elements}}
+            self._request(
+                "PATCH",
+                f"{FEISHU_BASE_URL}/docx/v1/documents/{doc_id}/blocks/{child1}",
+                json=body,
             )
-            self.update_text_block(doc_id, child1, dialog_text, multiline=True)
+            logger.info("口播对话已填充（含黄色高亮）")
 
         # Col 2: 图片素材 (cell at row=1, col=2)
         cell2 = cells[5]
@@ -609,6 +614,45 @@ class FeishuClient:
             self.update_text_block(doc_id, child2, images_text, multiline=True)
 
         logger.info("口播表格填充完成")
+
+    def _build_oral_dialog_elements(self, dialogs: list) -> list:
+        """构建口播对话的富文本 elements，对【...】标记施加黄色高亮。
+
+        飞书 text_element_style.background_color 取值 1-20，3 为浅黄色。
+        """
+        YELLOW = 3
+
+        elements = []
+        for i, d in enumerate(dialogs):
+            if i > 0:
+                elements.append({
+                    "text_run": {"content": "\n\n", "text_element_style": {}},
+                })
+
+            role = d[0]
+            content = d[1]
+
+            elements.append({
+                "text_run": {"content": role, "text_element_style": {"bold": True}},
+            })
+            elements.append({
+                "text_run": {"content": "：", "text_element_style": {}},
+            })
+
+            parts = re.split(r"(【[^】]+】)", content)
+            for part in parts:
+                if not part:
+                    continue
+                if re.match(r"【[^】]+】", part):
+                    elements.append({
+                        "text_run": {"content": part, "text_element_style": {"background_color": YELLOW}},
+                    })
+                else:
+                    elements.append({
+                        "text_run": {"content": part, "text_element_style": {}},
+                    })
+
+        return elements
 
     def _update_cover_title_bullet(self, doc_id: str, blocks: list,
                                    block_map: dict, title: str):

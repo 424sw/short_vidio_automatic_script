@@ -60,7 +60,8 @@ def build_synthesis_prompt(frame_count: int, video_title: str,
 逐帧描述：\n{descriptions}"""
 
 
-def build_mix_prompt(synthesis: str, custom_requirements: str = "") -> str:
+def build_mix_prompt(synthesis: str, custom_requirements: str = "",
+                      audio_transcript: str = "") -> str:
     """构建混剪脚本生成的 Prompt。
 
     强制执行规则：
@@ -134,7 +135,8 @@ def build_mix_prompt(synthesis: str, custom_requirements: str = "") -> str:
 {products}"""
 
 
-def build_oral_prompt(synthesis: str, custom_requirements: str = "") -> str:
+def build_oral_prompt(synthesis: str, custom_requirements: str = "",
+                      audio_transcript: str = "") -> str:
     """构建口播脚本生成的 Prompt。
 
     强制执行规则：
@@ -146,7 +148,6 @@ def build_oral_prompt(synthesis: str, custom_requirements: str = "") -> str:
     req = load_requirements()
     o = req["口播"]
     dialog_count = o.get("对话轮数", 20)
-    image_count = o.get("图片素材数量", 20)
     emotions = "、".join(o.get("情绪选项", []))
     products = _build_product_section()
     mid_dialog = dialog_count // 2
@@ -170,6 +171,11 @@ def build_oral_prompt(synthesis: str, custom_requirements: str = "") -> str:
 
 两个角色通过对话形式讨论话题，不需要大量配图，仅保留少量关键图片素材作为视觉补充。
 
+## 🔴 原始音频转录（original_text 的唯一来源）
+下面是语音转文字得到的完整视频文案，请**原封不动**地将此内容作为 original_text 字段输出（可去除标点、用换行分隔停顿，但**严禁缩写、概括、改写任何原文细节**）。
+🔴 若转录含繁体字，**必须全部转为简体中文**。
+{audio_transcript or "（无音频转录）"}
+
 {override}
 ## 视频分析
 {synthesis}
@@ -178,43 +184,36 @@ def build_oral_prompt(synthesis: str, custom_requirements: str = "") -> str:
 {{{{
   "title": "标题（15-25字）",
   "hashtags": ["话题词1", "话题词2", "话题词3"],
-  "original_text": "完整原片文案（{o.get('原片文案字数', '150-300字')}，纯文本，无角色对话，无标点符号，用换行分隔停顿）",
+  "original_text": "直接复制上方🔴原始音频转录中的完整内容，不要缩写概括改写",
   "dialogs": [
-    ["角色A", "对话内容【情绪】"],
-    ["角色B", "对话内容【情绪】"]
+    ["A", "多句话的完整对话内容，不能只有一句【4字标记】"],
+    ["B", "多句话的完整对话内容，不能只有一句【4字标记】"]
   ],
   "images": [
-    "😺 素材描述1",
-    "🐶 素材描述2"
+    "鱼泡直聘APP图标.jpg 蓝白配色求职招聘应用图标"
   ]
 }}}}
 
 ## 对话要求
 - **必须正好 {dialog_count} 轮** A/B 角色对话
 - 对话结构：{o.get('对话结构', '开场几轮抛出问题 → 中间几轮给出干货建议 → 后半段深化理解 → 结尾积极号召收尾')}
-- 每轮对话格式：["角色名", "对话内容【情绪标记】"]
-- 情绪标记放在对话内容的末尾，用【】包裹
-- 可选情绪：{emotions}
-- **对话内容严禁使用任何标点符号**，用自然换行分隔表示语气停顿
+- 🔴 角色名**只能是 "A" 和 "B"**（纯字母），**绝对不能**写成 "角色A"、"角色B"、"**A**" 等任何变体
+- 🔴 **每轮对话必须是 3-5 句话的完整大段表达**，包含观点、铺垫、回应、递进，**严禁**单句对话（单句是不合格的输出）
+- 情绪标记放在每轮对话内容的末尾，用【】包裹
+- 🔴 **标记以 4 字为主**（如：【热心推荐】【恍然大悟】【疑惑不解】【无奈摇头】），可以是动作、情绪、描述，不限于情绪词
+- 可选标记可参考：{emotions}
+- **对话内容用标点符号正常断句**（口播是对白，需标点表达语气停顿）
 - 对话要口语化、有互动感，A/B角色交替出现
 
-## 图片素材要求（少量即可）
-- {o.get('图片素材数量', 5)} 条图片素材即可（对话式脚本不需要大量配图）
-- 每条格式：以 **emoji 表情**开头 + 文件名.jpg + 中文描述
-- 仅用于关键场景的视觉点缀
-
-## 原片文案要求
-- {o.get('原片文案字数', '150-300字')}，{o.get('原片风格', '完整的原片叙述，纯文本，无角色对话')}
-- **严禁标点符号**，用换行分隔停顿
-
 ## 图片素材要求
-- **必须正好 {image_count} 条**图片素材（不能少于此数量）
-- 每条格式：以 **emoji 表情**开头 + 中文描述
-- 描述格式：文件名.jpg 中文描述 如 "😺 功德猫.jpg 穿僧袍戴佛珠的猫咪祈福表情包"
+- 🔴 **只需 2-3 条**图片素材（文字描述即可，系统不支持插入实际图片）
+- 素材风格：**官方/品牌风格**，如 APP 图标、产品截图、场景示意图、数据图表等
+- 🔴 **严禁**使用表情包、emoji、动物、卡通等趣味素材（那是混剪脚本才用的风格）
+- 每条格式：中文描述，如 "鱼泡直聘APP图标.jpg 蓝白配色求职招聘应用图标"
 - 用换行分隔每条素材
 
 ## 话题词要求
-- 3-5个中文短语话题词
+- 4-5个中文短语话题词
 - 格式如：职场干货 #面试技巧 #求职
 
 {ad_block}
