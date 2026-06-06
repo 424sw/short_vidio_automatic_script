@@ -73,6 +73,13 @@ class FeishuClient:
                 self._ensure_token()
                 resp = self._session.request(method, url, timeout=timeout, **kwargs)
 
+            # 429 限流：等待后重试
+            if resp.status_code == 429:
+                wait = RETRY_BACKOFF * (2 ** attempt)
+                logger.warning(f"飞书限流 429，等待 {wait}s 后重试...")
+                time.sleep(wait)
+                continue
+
             # 先检查 HTTP 状态码
             if resp.status_code >= 400:
                 content_type = resp.headers.get("content-type", "")
@@ -410,10 +417,6 @@ class FeishuClient:
 
         if title_block:
             mix_title = script.get("title", video_title)
-            mix_hashtags = script.get("hashtags", [])
-            if mix_hashtags:
-                mix_title = mix_title + " " + " ".join(
-                    f"#{t.strip('#')}" for t in mix_hashtags)
             self.update_text_block(doc_id, title_block["block_id"], mix_title)
 
         # --- Step 4: 填充表格 ---
@@ -427,10 +430,6 @@ class FeishuClient:
         blocks = self.get_blocks(doc_id)
         block_map = {b["block_id"]: b for b in blocks}
         cover_title = script.get("title", video_title)
-        cover_hashtags = script.get("hashtags", [])
-        if cover_hashtags:
-            cover_title = cover_title + " " + " ".join(
-                f"#{t.strip('#')}" for t in cover_hashtags)
         self._update_cover_title_bullet(doc_id, blocks, block_map, title=cover_title)
         # 更新交付要求中的【标题】和【正文】字段
         self._update_delivery_fields(doc_id, blocks, block_map,
@@ -557,7 +556,8 @@ class FeishuClient:
         self._fill_oral_table(doc_id, table_block, script, blocks, block_map)
 
         # --- Step 5: 更新封面标题 + 交付要求字段 ---
-        self._update_cover_title_bullet(doc_id, blocks, block_map, title=full_oral_title)
+        # 封面要求的"标题"和交付要求的【标题】都不含话题词，【正文】含话题词
+        self._update_cover_title_bullet(doc_id, blocks, block_map, title=oral_title)
         self._update_delivery_fields(doc_id, blocks, block_map,
                                      title=oral_title,
                                      hashtags=oral_hashtags)
@@ -626,14 +626,14 @@ class FeishuClient:
         for i, d in enumerate(dialogs):
             if i > 0:
                 elements.append({
-                    "text_run": {"content": "\n\n", "text_element_style": {}},
+                    "text_run": {"content": "\n", "text_element_style": {}},
                 })
 
             role = d[0]
             content = d[1]
 
             elements.append({
-                "text_run": {"content": role, "text_element_style": {"bold": True}},
+                "text_run": {"content": role, "text_element_style": {}},
             })
             elements.append({
                 "text_run": {"content": "：", "text_element_style": {}},

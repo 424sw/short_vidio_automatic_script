@@ -75,6 +75,23 @@ streamlit run app.py           # http://localhost:8501
 | 交付【正文】写入 | feishu_ops.py `_update_delivery_fields` | regex 精确匹配替换已生效 |
 | 口播 Prompt 全面优化 | prompt_builder.py | 角色 A/B、3-5句对话、4字标记、2-3张官方图、黄色高亮、音频转录透传 |
 | src/ 热重载 | app.py | `importlib.reload()` 强制刷新 src/ 模块 |
+| Hook 自动清缓存+重启 | settings.json | PostToolUse(Write\|Edit) → 清空 `__pycache__` + kill 端口进程 + 重启 Streamlit |
+
+### ⚠️ Streamlit 缓存教训
+
+**这是本项目最大的隐性坑。** Streamlit 只会热重载入口文件 `app.py`，已导入的 `src/` 模块**不会**自动刷新。即使改代码 → 保存 → 浏览器刷新，跑的还是旧代码。
+
+**症状**：
+- 改的代码逻辑没生效，报错信息跟实际代码不符
+- `__pycache__/*.pyc` 是脏的，Python 3.13 一直加载旧字节码
+- 多进程并存（`taskkill` 可能漏杀），浏览器随机连到旧进程
+
+**正确做法（必须三步**）：
+1. 清掉所有 `__pycache__/` 和 `*.pyc`（`find . -name "*.pyc" -delete`）
+2. 杀掉端口上**所有** Streamlit 进程（`netstat -ano | grep 8501 | awk '{print $5}' | sort -u` 逐个 `taskkill //F //PID`）
+3. 等端口释放后重新启动
+
+已配置为 Hook（`PostToolUse` 自动触发），但手动测试时仍需记。
 
 ### 已知问题 🔴
 
@@ -134,8 +151,10 @@ git checkout main && git branch -D deploy
 
 ## 后续规划
 
-1. **🟢 当前：口播端到端测试收尾** — 修复繁体字、A/B格式、交付标题话题词、断句方式等细节，验证通过后加入类型自动判断
-2. **增加 AI 审核微调环节** — 生成脚本后、填入飞书前，增加一步 AI 自检：对照 Prompt 要求逐项校验输出，自动修正格式/内容偏差
-3. **优化全流程时间开销** — 并行帧/音频提取、更快的模型
-4. **用户subAgent** — 功能拓展（设定简单要求、输出文档数目和质量等）
+1. **🟢 当前：口播端到端测试收尾** — 口播输出已基本达标（A/B格式、黄色高亮、官方图、断句、标题话题词、繁转简、交付字段均就绪），待收尾确认
+2. **优化语音转文字准确率** — Whisper tiny 模型转录质量不稳定，需评估换用更大模型或接入云端 ASR
+3. **回测混剪输出** — 当前一直测试口播，需验证混剪脚本输出未被改动影响
+4. **实现类型自动判断** — AI 分析视频时自动判断混剪/口播，替代当前硬编码，参考完整版 `ScriptGenerator.detect_type()`
+5. **增加 AI 审核微调环节** — 生成脚本后、填入飞书前，增加一步 AI 自检：对照 Prompt 逐项校验，自动修正格式/内容偏差
+6. **优化全流程时间开销** — 并行帧/音频提取、更快的模型
 5. **开拓管理 subAgent** — 一键修改配置并部署
