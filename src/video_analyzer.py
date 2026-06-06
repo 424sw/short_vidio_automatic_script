@@ -9,7 +9,8 @@ from pathlib import Path
 
 from openai import OpenAI
 
-from config import AGNES_BASE_URL, AGNES_API_KEY, AGNES_MODEL, FFMPEG_PATH, load_requirements
+from config import AGNES_BASE_URL, AGNES_API_KEY, AGNES_MODEL, FFMPEG_PATH, load_requirements, \
+    WHISPER_TIMEOUT_SEC
 from src.prompt_builder import get_quality_config, build_synthesis_prompt
 
 logger = logging.getLogger(__name__)
@@ -225,14 +226,28 @@ def _transcribe_audio(audio_path: str) -> str:
     logger.info(f"转录音频（{'本地模型' if local_only else '在线下载'}，{dur:.0f} 秒）...")
     try:
         from faster_whisper import WhisperModel
+        from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeout
         model = WhisperModel(model_path, device="cpu", compute_type="int8",
                             local_files_only=local_only)
         initial_prompt = _build_whisper_initial_prompt()
         logger.info(f"Whisper 领域上下文: {initial_prompt[:80]}...")
-        segments, info = model.transcribe(audio_path, language="zh",
-                                           beam_size=5, vad_filter=True,
-                                           initial_prompt=initial_prompt)
-        text = "".join(s.text.strip() for s in segments)
+
+        # 在独立线程中执行转录，超时兜底
+        def _do_transcribe():
+            segments, info = model.transcribe(audio_path, language="zh",
+                                               beam_size=5, vad_filter=True,
+                                               initial_prompt=initial_prompt)
+            text = "".join(s.text.strip() for s in segments)
+            return text, info
+
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            future = executor.submit(_do_transcribe)
+            try:
+                text, info = future.result(timeout=WHISPER_TIMEOUT_SEC)
+            except FutureTimeout:
+                logger.warning(f"Whisper 转录超时（{WHISPER_TIMEOUT_SEC}秒），返回部分结果")
+                return f"音频时长: {dur:.1f}秒\n音频转录:\n（转录超时，音频时长 {dur:.0f} 秒）\n语言: zh\n⚠️ 转录超时，请在生成脚本时参考视频帧分析内容"
+
         if text:
             return f"音频时长: {dur:.1f}秒\n音频转录:\n{text}\n语言: {info.language}\n⚠️ 若转录为繁体，请在下游 AI 步骤中要求转换为简体中文"
     except ImportError:
@@ -276,15 +291,18 @@ class VideoAnalyzer:
 
         logger.info(f"抽帧 (max={max_frames}): {video_path}")
         cmd = [
-            FFMPEG_PATH, "-i", str(video_path),
+            FFMPEG_PATH, "-y",
+            "-i", str(video_path),
             "-vf", "fps=1",
             "-q:v", "2",
             str(out / "frame_%03d.jpg"),
-            "-y",
         ]
         r = subprocess.run(cmd, capture_output=True, text=True, timeout=180)
         if r.returncode != 0:
-            raise VideoAnalysisError(f"抽帧失败: {r.stderr[:300]}")
+            # stderr 开头是 FFmpeg 版本横幅，尾部才是错误信息
+            err = r.stderr.strip()
+            err_tail = err[err.rfind("Error"):] if "Error" in err else err[-500:]
+            raise VideoAnalysisError(f"抽帧失败: {err_tail}")
 
         frames = sorted(out.glob("frame_*.jpg"))
         if not frames:
@@ -302,10 +320,11 @@ class VideoAnalyzer:
         ap = out / "audio.mp3"
 
         r = subprocess.run([
-            FFMPEG_PATH, "-i", str(video_path),
+            FFMPEG_PATH, "-y",
+            "-i", str(video_path),
             "-vn", "-acodec", "libmp3lame",
             "-ar", "16000", "-ac", "1", "-q:a", "5",
-            str(ap), "-y",
+            str(ap),
         ], capture_output=True, text=True, timeout=60)
         if r.returncode != 0:
             logger.warning(f"音频提取失败: {r.stderr[:200]}")
@@ -338,39 +357,36 @@ class VideoAnalyzer:
         return resp.choices[0].message.content
 
     def analyze(self, video_path: str, title: str, author: str = "",
-                quality: str = "standard") -> dict:
-        sid = uuid.uuid4().hex[:8]
-        wd = Path("data") / "frames" / sid
+                quality: str = "standard", session_dir: str = None) -> dict:
+        """分析视频。所有临时文件写入 session_dir，由调用方统一管理生命周期。"""
+        if session_dir:
+            wd = Path(session_dir)
+        else:
+            sid = uuid.uuid4().hex[:8]
+            wd = Path("data") / "frames" / sid
         wd.mkdir(parents=True, exist_ok=True)
 
-        try:
-            # 抽帧 + 音频（并行可优化，当前串行）
-            logger.info("抽帧 + 音频...")
-            frames = self.extract_frames(video_path, str(wd), quality)
-            audio_path = self.extract_audio(video_path, str(wd))
+        # 抽帧 + 音频（并行可优化，当前串行）
+        logger.info("抽帧 + 音频...")
+        frames = self.extract_frames(video_path, str(wd), quality)
+        audio_path = self.extract_audio(video_path, str(wd))
 
-            # 转录（所有模式都执行，这是核心功能）
-            audio_transcript = _transcribe_audio(audio_path) if audio_path else ""
+        # 转录（所有模式都执行，这是核心功能）
+        audio_transcript = _transcribe_audio(audio_path) if audio_path else ""
 
-            # 帧分析（quality 影响 vision_detail 和帧数）
-            logger.info("帧分析...")
-            frame_analysis = _analyze_frames([str(f) for f in frames], quality)
+        # 帧分析（quality 影响 vision_detail 和帧数）
+        logger.info("帧分析...")
+        frame_analysis = _analyze_frames([str(f) for f in frames], quality)
 
-            # 综合（quality 影响 max_tokens）
-            logger.info("综合理解...")
-            synthesis = self.synthesize(frame_analysis,
-                                        {"title": title, "author": author},
-                                        audio_transcript, quality)
+        # 综合（quality 影响 max_tokens）
+        logger.info("综合理解...")
+        synthesis = self.synthesize(frame_analysis,
+                                    {"title": title, "author": author},
+                                    audio_transcript, quality)
 
-            return {
-                "frame_analysis": frame_analysis,
-                "synthesis": synthesis,
-                "audio_transcript": audio_transcript,
-                "quality": quality,
-            }
-        finally:
-            import shutil
-            try:
-                shutil.rmtree(wd, ignore_errors=True)
-            except Exception:
-                pass
+        return {
+            "frame_analysis": frame_analysis,
+            "synthesis": synthesis,
+            "audio_transcript": audio_transcript,
+            "quality": quality,
+        }

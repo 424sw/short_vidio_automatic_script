@@ -1,3 +1,9 @@
 [client]
 # 隐藏右上角的 Deploy / Stop / 工具栏
 toolbarMode = "viewer"
+
+[server]
+# 防止后台标签页 WebSocket 超时断开
+websocketConnectionTimeoutMs = 300000
+websocketCompressionLevel = 0
+maxMessageSize = 500

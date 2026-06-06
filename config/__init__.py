@@ -28,13 +28,6 @@ def _decrypt(ciphertext: str) -> str:
     return bytes(a ^ b for a, b in zip(encrypted, key)).decode()
 
 
-def _encrypt(plaintext: str) -> str:
-    import secrets
-    salt = secrets.token_bytes(16)
-    key = _derive_key(_DECRYPT_PASSWORD, salt, len(plaintext.encode()))
-    encrypted = bytes(a ^ b for a, b in zip(plaintext.encode(), key))
-    return base64.urlsafe_b64encode(salt + encrypted).decode()
-
 
 # ============================================================
 # API 密钥（环境变量 > 解密内置值）
@@ -68,7 +61,6 @@ AGNES_MODEL = "agnes-2.0-flash"
 FEISHU_AUTH_URL = "https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal"
 FEISHU_BASE_URL = "https://open.feishu.cn/open-apis"
 
-SCRIPT_GENERATION_TEMPERATURE = 0.3
 
 # ============================================================
 # FFmpeg
@@ -130,18 +122,16 @@ def get_template_id(t: str) -> str:
     return tc.get(key, defaults[t])
 
 
-def generate_doc_title(script_type: str, seq: int = 1, suffix: str = "") -> str:
-    """生成文档标题，支持唯一后缀防止多用户并发命名冲突。
+def generate_doc_title(script_type: str, seq: int = 1) -> str:
+    """生成文档标题。
 
     Args:
         script_type: "mix"（混剪）或 "oral"（口播）
         seq: 序号（当天第几个）
-        suffix: 唯一后缀（如 session_id），防止并发重名
     """
     today = datetime.now().strftime("%Y.%m.%d")
     type_name = "混剪脚本" if script_type == "mix" else "口播脚本"
-    base = f"{today}+{type_name}+{seq:03d}"
-    return f"{base}-{suffix}" if suffix else base
+    return f"{today}+{type_name}+{seq:03d}"
 
 
 # ============================================================
@@ -197,41 +187,23 @@ def load_requirements() -> dict:
         return dict(_DEFAULT_REQUIREMENTS)
 
 
+
 # ============================================================
-# 管理员密码
+# 边界控制常量（面向 ModelScope 单实例部署）
 # ============================================================
-_ADMIN_JSON = Path(__file__).parent / "admin.json"
+
+# 输出数目上限
+MAX_SCRIPT_COUNT = 5
 
 
-def _get_admin_password() -> str:
-    if _ADMIN_JSON.exists():
-        try:
-            data = json.loads(_ADMIN_JSON.read_text(encoding="utf-8"))
-            enc = data.get("admin_password_encrypted", "")
-            if enc:
-                return _decrypt(enc)
-        except Exception:
-            pass
-    return _decrypt("RXGvYXYp3sK_lPUodoUHhArfpTwkoK1g")
+# 飞书文档存活时间（秒），超时自动删除
+DOC_TTL_SECONDS = 300  # 5 分钟
 
+# 视频下载最长时长（秒），FFmpeg -t 参数
+MAX_VIDEO_DURATION_SEC = 300  # 5 分钟
 
-def save_admin_credentials(password: str, recovery_key: str = "") -> bool:
-    data = {}
-    if _ADMIN_JSON.exists():
-        try:
-            data = json.loads(_ADMIN_JSON.read_text(encoding="utf-8"))
-        except Exception:
-            pass
-    data["admin_password_encrypted"] = _encrypt(password)
-    if recovery_key:
-        data["recovery_key_encrypted"] = _encrypt(recovery_key)
-    try:
-        _ADMIN_JSON.parent.mkdir(parents=True, exist_ok=True)
-        _ADMIN_JSON.write_text(json.dumps(data, ensure_ascii=False, indent=2),
-                               encoding="utf-8")
-        return True
-    except Exception:
-        return False
+# 磁盘最小剩余空间（字节），低于此值拒绝下载
+MIN_FREE_DISK_BYTES = 100 * 1024 * 1024  # 100 MB
 
-
-ADMIN_PASSWORD = _get_admin_password()
+# Whisper 转录超时（秒）
+WHISPER_TIMEOUT_SEC = 300  # 5 分钟

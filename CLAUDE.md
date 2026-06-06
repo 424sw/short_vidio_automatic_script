@@ -62,78 +62,29 @@ streamlit run app.py           # http://localhost:8501
 
 ## 当前状态（截至 2026-06-06）
 
-### 混剪回测完成 ✅
+### 本次对话已完成 ✅
 
-口播 → 混剪回测通过。混剪输出已验证：
-- 标题含话题词 ✅
-- 品牌无粗体 ✅
-- 话题词 4-5 个 ✅
-- 交付【标题】不含话题词、封面标题不含话题词、【正文】含话题词 ✅
-- 内容长度与参考视频相当 ✅
+| 改动 | 文件 | 说明 |
+|------|------|------|
+| WebSocket keepalive | `.streamlit/config.toml` | `[server]` 配置，后台标签页不再弹重连 |
+| 删除 beforeunload 弹窗 | `app.py` | 删 `_inject_exit_guard()`，步骤过渡不打扰 |
+| 浏览器 beacon 机制 | `app.py` | JS 每 15s ping + 关闭发 close beacon → 即时释放锁 |
+| 守护心跳线程移除 | `app.py` | 旧心跳线程导致僵尸锁永不过期，已删 |
+| `_LOCK_STALE_SECONDS` 调整 | `app.py` | 30s → 360s（6 分钟兜底） |
+| `_check_cancel()` 加断连检测 | `app.py` | 检查 `.closed` 和 `.browser_seen` 超时 |
+| 文档过期改为文件队列 | `app.py` | `threading.Timer` → `data/.expiry_queue` JSONL，`main()` 每次检查 |
+| 文档标题去 hex 后缀 | `config/__init__.py`, `feishu_ops.py` | 删 `session_suffix` |
+| `target_chars` 计算修复 | `app.py` | 正则修复 + 无音频时用时长估算 |
+| `max_tokens` 动态计算 | `script_generator.py` | 根据 `target_chars` 动态限制输出预算 |
+| 飞书删除 API 加 type | `feishu_ops.py` | `delete_document()` 补 `params={"type": "docx"}` |
+| 输出面板提示 | `app.py` | 「5分钟后且退出网页后，文档自动删除」 |
 
-### 规划 3+4 已实现：类型自动判断 + 审核微调 ✅
+### 已知问题 🔴
 
-1. **类型自动判断**：`ScriptGenerator.detect_type()` + UI selectbox「自动检测/混剪/口播」，默认自动检测。
-2. **AI 审核微调**：`ScriptGenerator.review()` + `build_review_prompt()`，逐项对照审核清单校验修正，低温稳定，失败不阻塞。
-3. **5 步管道**：①提取→②分析+检测→③生成→④审核→⑤飞书→结果，进度条 `/5`。
-
-### 规划 6 已实现：输出质量 + 输出数目 + 内容长度约束 ✅
-
-1. **三档质量**：`get_quality_config()` — 快速(5帧/简要)、标准(10帧/详细)、精细(20帧/最大详细)，影响抽帧数、vision_detail、synthesis max_tokens。进度面板时间估算随质量动态显示。
-2. **多脚本输出**：`generate_multiple()` 批量生成，`_build_diversity_instruction()` 按 variation_seed 注入不同叙事角度和素材偏好（混剪 5 种+口播 5 种），不做重叠率校验。
-3. **内容长度硬性约束**：`step3_generate()` 从音频转录计算原视频口播字数 → `target_chars`，注入 Prompt：脚本总字数必须在原视频的 80%-120% 范围内。
-4. **UI 同行布局**：类型/质量/数目三控件 `st.columns` 并排，`clear_run()` bug 已修复（保存/恢复用户选择）。
-
-### 输入面板 UI
-
-```
-抖音视频链接 [text_input                    ]
-[脚本类型 ▼] [输出质量 ▼] [输出数目 ±]
-[        开始生成脚本        ]
-```
-
-### 语音转文字 — 双重优化 ✅
-
-1. **模型升级**：faster-whisper-tiny（75MB）→ small（462MB），中文识别大幅改善
-2. **领域上下文注入**：`_build_whisper_initial_prompt()` 维护互联网热词库（主包、家人们、绝绝子、yyds…），作为 `initial_prompt` 传入 Whisper 解码器
-3. **AI 纠错**：synthesis + oral prompt 均包含 ASR 典型错误示例，指导 AI 二次修复
-
-### app.py — 2026-06-06 UI 重构
-
-三面板独立化：`main()` 改为严格 `if/elif/else` 三路分支，面板互不干扰。进度面板重写：去除 `st.status()`（可折叠下拉框），改用 `st.progress()` 进度条 + 步骤标题 + `st.spinner()`。
-
-### 已验证修复 ✅
-
-| 修复内容 | 文件 | 方式 |
-|---------|------|------|
-| 三面板独立化 | app.py | `main()` 严格 if/elif/else |
-| 进度面板重写 | app.py | 去 `st.status`，换进度条 + spinner |
-| 表格多行换行 | feishu_ops.py | `multiline=True` 拆分 text_run 已生效 ✅ |
-| 软广植入 | prompt_builder.py | 🔴 硬性指令：前50%/第一个品牌/产品库匹配 |
-| 话题词校验 | script_generator.py `_validate` | hashtags 不足 4 个抛 ScriptGeneratorError |
-| rows 跨列解包 | feishu_ops.py `_fill_mix_table` | `for i, row in enumerate(rows_data)` + 索引取值 |
-| 口播 Prompt 全面优化 | prompt_builder.py | 角色 A/B、3-5句对话、4字标记、2-3张官方图、黄色高亮、音频转录透传 |
-| Whisper tiny→small 升级 | video_analyzer.py, setup_models.py | 模型 ~75MB→~462MB，中文识别准确率大幅提升 |
-| Whisper 领域上下文注入 | video_analyzer.py | `_build_whisper_initial_prompt()` — 互联网热词库 + 品牌/术语作为 `initial_prompt` 传入 Whisper，减少音近错字 |
-| AI 转录纠错双重提示 | prompt_builder.py | synthesis + oral prompt 均加入 ASR 错误示例，指导 AI 逐句修复 |
-| 混剪标题含话题词 | prompt_builder.py | 示例 + 要求均含 `#话题词` |
-| 混剪品牌不加粗 | prompt_builder.py | 删除广告指令中的粗体要求 |
-| 交付【标题】不含话题词 | feishu_ops.py `_update_delivery_fields` | `clean_title = re.sub(r'\s*#[^\s#]+', '', title)` |
-| 封面标题不含话题词 | feishu_ops.py `fill_mix_script` / `fill_oral_script` | 传给 `_update_cover_title_bullet` 的标题清洗掉 `#xxx` |
-| 话题词数量 4-5 个 | prompt_builder.py + script_generator.py | Prompt 🔴 硬性要求 + 示例 4 个 + 校验 ≥4 |
-| 内容长度匹配参考视频 | prompt_builder.py | Prompt 新增约束：仿写篇幅与原视频文案一致 |
-| src/ 热重载 | app.py | `importlib.reload()` 强制刷新 src/ 模块 |
-| PostToolUse Hook 已移除 | settings.json | 无用且不可靠，已删除 |
-| 类型自动检测 | script_generator.py `detect_type()` | AI 判断混剪/口播，异常回退 `"mix"` |
-| UI 类型选择器 | app.py `render_input_panel()` | selectbox 三选一：自动检测/混剪/口播 |
-| AI 审核微调 | script_generator.py `review()` + prompt_builder.py `build_review_prompt()` | 对照审核清单逐项校验，低温稳定，失败不阻塞 |
-| 5 步管道 | app.py | 步骤重新编号：①提取→②分析+检测→③生成→④审核→⑤飞书 |
-| 三档输出质量 | prompt_builder.py `get_quality_config()` | fast(5帧)/standard(10帧)/fine(20帧) + vision_detail + synthesis tokens |
-| 多脚本批量生成 | script_generator.py `generate_multiple()` + `_build_diversity_instruction()` | variation_seed 驱动不同叙事角度和素材偏好 |
-| 内容长度硬性约束 | prompt_builder.py + app.py `step3_generate()` | 从音频转录估算原视频字数 → target_chars → Prompt 80%-120% 约束 |
-| 质量联动时间估算 | app.py `_get_step_estimates()` | 进度面板预计时间随质量档位动态显示 |
-| clear_run() 吞掉用户选择 | app.py `render_input_panel()` | 点击按钮前保存 类型/质量/数目 → clear_run() → 恢复 |
-| UI 同行布局 | app.py | 类型/质量/数目三控件 st.columns 并排 |
+1. **内容长度控制不精确** — 当前 `max_tokens` 动态约束 + Prompt 软引导，AI 仍可能超出参考视频长度。校验拒绝+重试又太耗时（3 次全报废）。需要找到低开销的精确控制方案。
+2. **浏览器 beacon close 信标未验证** — JS `pagehide`/`beforeunload` → `fetch('/?__close=...')` → `_handle_beacon()` → 释放锁。但 `st.components.v1.html` 的 fetch 可能不走 Streamlit 路由（和 `__expire_check` 同问题），需要双窗口实测。
+3. **文档过期触发不可靠** — `_cleanup_expired_docs()` 在 `main()` 入口调用，但页面不会自动请求服务器。文档过期后需有人访问网站才触发清理。当前依赖被动触发。
+4. **多脚本输出质量不一致** — 批量生成时部分脚本不满足格式要求。例如口播脚本的 dialogs 中缺少【情绪/动作标记】（Prompt 要求每轮对话末尾用【】标注情绪，但 `_validate()` 只检查 `[角色, 对话]` 结构，不校验末尾是否包含标记词）。混剪脚本也可能出现类似偏差。需在 `_validate()` 增加对应检查或在 Prompt 中强化约束。
 
 ### ⚠️ Streamlit 缓存教训
 
@@ -148,10 +99,6 @@ streamlit run app.py           # http://localhost:8501
 1. 清掉所有 `__pycache__/` 和 `*.pyc`（`find . -name "*.pyc" -delete`）
 2. 杀掉端口上**所有** Streamlit 进程（`netstat -ano | grep 8501 | awk '{print $5}' | sort -u` 逐个 `taskkill //F //PID`）
 3. 等端口释放后重新启动
-
-### 已知问题 🔴
-
-（当前无已知问题，全部已修复）
 
 ### 脚本类型：支持自动检测 + 手动选择
 
@@ -198,22 +145,90 @@ git push modelscope deploy:master
 git checkout main && git branch -D deploy
 ```
 
-## 边界问题（极简版未覆盖）
+## 边界处理（2026-06-06 全面实现）
 
-| 问题 | 完整版方案 | 影响 |
-|------|-----------|------|
-| 飞书文档永久残留 | `doc_registry.json` + 5 分钟 TTL 自动删除 | 每次生成留下一个文档，无自动清理 |
-| 用户关闭浏览器 | atexit / session teardown hook | 临时视频文件 `data/<id>/downloads/` 永久留在磁盘；正在执行的步骤无法优雅中止 |
+### 部署环境
+
+ModelScope 免费版：2 vCPU / 16 GB 内存 / **单实例，多用户串行共享**。
+
+### 并发控制：文件锁 + FIFO 队列
+
+两文件实现：`data/.running`（当前持有者 session_id）+ `data/.queue`（等待队列，一行一个 session_id）。
+
+流程图：用户点击「开始生成」→ `_acquire_lock()` 尝试创建锁文件（原子操作 `O_CREAT|O_EXCL`）→ 成功则进入管道 / 失败则 `_join_queue()` 排队 → 等待面板每 2 秒 `_is_my_turn()` 检查队首是否是自己且锁是否空闲 → 轮到时获取锁并 `clear_run()` 启动管道。
+
+**浏览器信标**：进度面板每次渲染注入 JS 每 15 秒 fetch 存活 ping；`pagehide`/`beforeunload` 事件发送 close beacon → `_handle_beacon()` 释放锁。360 秒锁超时作为兜底（浏览器崩溃等极端情况）。
+
+### 已知限制：运行中关闭 Tab
+
+**Whisper 转录是 Python 单进程内的阻塞调用，Streamlit 无法中途终止。** 关闭浏览器后后台进程会继续跑完整个管道（包括创建飞书文档）。最长等待 ≈ Whisper 超时（5 分钟）。这是 Python/Streamlit 单进程模型的根本限制，要彻底解决需将 Whisper 改为独立子进程。
+
+### 临时文件全生命周期
+
+- 所有临时文件统一在 `data/<session_id>/` 下
+- `_cleanup_session()` = `shutil.rmtree(data/<sid>/)` + `_release_lock()`
+- 每个步骤异常/取消均调用 `_cleanup_session()`
+- 应用启动时 `_cleanup_stale_data()` 清空所有残留（通过 `data/.cleanup_done` 标记确保进程生命周期内只执行一次）
+
+### 用户取消
+
+**取消**：进度面板「⏹ 取消生成」按钮 → `cancel_requested = True` → `_check_cancel()` 抛出 `StepCancelledError` → 清理 + 回到输入面板。
+
+### 5 分钟文档自动删除
+
+`step5_feishu()` 调用 `_enqueue_expiry()` 将文档 ID + 过期时间写入 `data/.expiry_queue`（JSONL）。`_cleanup_expired_docs()` 在 `main()` 入口和结果面板入口检查队列，到期调用飞书删除 API。**已知限制**：需有人访问网站才触发清理扫描，页面不会自动轮询。
+
+### 部分失败不丢结果
+
+`step5_feishu()` 循环创建文档：单个失败跳过，成功的仍然返回。汇总：`3/5 个文档创建成功`。
+
+### 动态磁盘管理
+
+- FFmpeg 下载限时长 `-t 300`（`MAX_VIDEO_DURATION_SEC = 300`）
+- 下载前检查剩余空间（`MIN_FREE_DISK_BYTES = 100MB`）
+- requests 流式下载时监控大小，超过剩余空间 50% 中止
+- 不写死文件大小上限，运行时动态判断
+
+### API 节流 & 重试
+
+- 批量生成脚本：每个间隔 1.5s（`generate_multiple()`）
+- AI API：429/503 指数退避重试（`_call_api()`）
+- 输出数目上限：`MAX_SCRIPT_COUNT = 5`，UI + 服务端双重 `min(count, MAX_SCRIPT_COUNT)` 约束
+
+### 重试逻辑全景（待优化，减少流程耗时的关键切入点）
+
+| 文件 | 位置 | 场景 | 次数 | 备注 |
+|------|------|------|------|------|
+| `script_generator.py` | `generate()` | 校验失败（结构/话题词/长度） | 3 | **最大开销**：每次校验失败调 AI 重生成 |
+| `script_generator.py` | `_call_api()` | API 429/503 限流 | 3 | 指数退避，必要开销 |
+| `script_generator.py` | `_parse_json()` | JSON 解析失败 | 1 | 仅在提供 retry_prompt 时触发 |
+| `script_generator.py` | `review()` | 审核校验失败 | 2 | 失败不阻塞，回退原脚本 |
+| `feishu_ops.py` | `_request()` | 飞书 API 限流/Token 过期 | 3 | Token 刷新后重试 |
+| `douyin_extractor.py` | 视频提取 | 网络请求失败 | 3 | 指数退避 |
+
+**优化方向**：`generate()` 校验失败 — 改重试为「抓取最后一次结果 + 自动修正」可省掉 2 次完整 AI 调用。
+
+### 错误提示
+
+输入面板仅当错误关键词包含「链接」或「Douyin」时才显示「请检查视频链接是否有效」提示，其他错误（抽帧失败、API 超时等）只显示错误信息本身。
+
+### 配置常量
+
+```python
+MAX_SCRIPT_COUNT = 5
+DOC_TTL_SECONDS = 300        # 飞书文档 5 分钟过期
+MAX_VIDEO_DURATION_SEC = 300 # FFmpeg 下载最长 5 分钟
+MIN_FREE_DISK_BYTES = 100 * 1024 * 1024  # 最低 100MB 磁盘
+WHISPER_TIMEOUT_SEC = 300    # Whisper 转录 5 分钟超时
+```
 
 ## 后续规划
 
-1. **🟢 混剪回测通过**
-2. **🟢 语音转文字优化完成** — 模型升级 + 领域热词注入 + AI 二次纠错。
-3. **🟢 类型自动判断已完成** — `detect_type()` + UI selectbox。
-4. **🟢 AI 审核微调已完成** — `review()` + `build_review_prompt()`，5 步管道。
-5. **🟢 输出质量/数目/长度约束已完成** — 三档质量 + 多脚本批量 + 字数硬性约束。
-6. 优化全流程时间开销 — 抽帧/转录并行、更快的模型
-7. 边界问题 — 飞书文档自动清理、临时文件生命周期等等
-8. 飞书图片插入功能 — 飞书 API 不支持 block_type=27，需另辟蹊径
-9. 开拓管理 subAgent — 一键修改配置并部署
-10. 进一步优化 — 多脚本合并到一个文档而非拆成多个，用户可一键转存所有文档到自己的飞书文档库
+1. 🔴 **内容长度精确控制** — 动态 `max_tokens` + Prompt 软约束不精确，校验拒绝+重试太慢。需低开销方案。
+2. 🔴 **浏览器 beacon 验证** — JS close 信标是否能被 Streamlit 处理，需双窗口实测。
+3. 🔴 **文档过期触发优化** — 当前无人访问则过期文档不清理，需无需轮询的服务端定时方案。
+4. 🔴 **多脚本输出质量校验** — `_validate()` 应检查口播 dialogs 是否含情绪标记、混剪 rows 是否含完整文案等格式细节，而非仅检查结构。
+5. **重试逻辑集中优化** — `generate()` 校验失败改「抓取结果 + 自动修正」省掉 2 次 AI 调用。
+6. **全流程时间优化** — 抽帧/转录并行、更快的模型。
+7. **飞书图片插入** — API 不支持 `block_type=27`，需另辟蹊径。
+8. **输出面板优化** — 多脚本合并到一个文档；输入面板个性要求。

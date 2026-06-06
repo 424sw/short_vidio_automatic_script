@@ -274,88 +274,6 @@ class FeishuClient:
         )
 
     # ============================================================
-    # 图片操作
-    # ============================================================
-    # 注意：飞书 docx API（tenant_access_token 模式）当前不支持创建/修改
-    # Image Block (block_type=27)。所有尝试（descendant、children、
-    # batch_update replace_image/add_blocks、inline_file）均返回 1770001
-    # 或静默忽略。目前仅支持图片上传，文档中仍用文字描述替代图片。
-    #
-    # 如将来飞书开放此能力，可取消下方注释并测试 insert_image_block。
-
-    def upload_image_media(self, image_path: str, parent_node: str) -> str:
-        """上传图片素材到飞书，返回 file_token。
-
-        **必须传入 parent_node**（文档 block_id），否则返回 403。
-
-        Args:
-            image_path: 本地图片文件路径
-            parent_node: 文档 page block_id 或目标 block_id
-
-        Returns:
-            file_token: 图片的 file_token
-        """
-        from pathlib import Path
-
-        p = Path(image_path)
-        if not p.exists():
-            raise FeishuError(f"图片文件不存在: {image_path}")
-
-        file_size = p.stat().st_size
-        file_name = p.name
-        logger.info(f"上传图片: {file_name} ({file_size / 1024:.1f}KB)")
-
-        self._ensure_token()
-        url = f"{FEISHU_BASE_URL}/drive/v1/medias/upload_all"
-
-        with open(image_path, "rb") as f:
-            resp = requests.post(
-                url,
-                headers={"Authorization": f"Bearer {self._token}"},
-                data={
-                    "file_name": file_name,
-                    "parent_type": "docx_image",
-                    "parent_node": parent_node,
-                    "size": str(file_size),
-                },
-                files={"file": (file_name, f.read(), "image/png")},
-                timeout=60,
-            )
-
-        if resp.status_code != 200:
-            raise FeishuError(f"图片上传失败 (HTTP {resp.status_code}): {resp.text[:500]}")
-
-        try:
-            data = resp.json()
-        except Exception:
-            raise FeishuError(f"图片上传返回非 JSON: {resp.text[:300]}")
-
-        code = data.get("code", -1)
-        if code != 0:
-            raise FeishuError(
-                f"图片上传 API 错误 (code={code}): {data.get('msg', 'unknown')}"
-            )
-
-        file_token = data.get("data", {}).get("file_token", "")
-        logger.info(f"图片上传成功: file_token={file_token}")
-        return file_token
-
-    # ---- 以下方法因飞书 API 限制暂不可用 ----
-
-    # def insert_image_block(self, doc_id: str, parent_block_id: str,
-    #                        image_token: str, index: int = 0) -> dict:
-    #     """在文档中插入图片 block（descendant API）。
-    #     注意：当前飞书 docx API 不支持创建 Image Block，此方法暂不可用。
-    #     """
-    #     ...
-
-    # def insert_image_into_table_cell(self, ...) -> bool:
-    #     """在表格单元格中插入图片。
-    #     注意：依赖 insert_image_block，当前不可用。
-    #     """
-    #     ...
-
-    # ============================================================
     # 模板填充编排
     # ============================================================
 
@@ -950,9 +868,10 @@ class FeishuClient:
         return {"doc_id": doc_id, "url": doc_url}
 
     def delete_document(self, doc_id: str) -> bool:
-        """删除飞书文档."""
+        """删除飞书文档。"""
         try:
-            self._request("DELETE", f"{FEISHU_BASE_URL}/drive/v1/files/{doc_id}", timeout=15)
+            self._request("DELETE", f"{FEISHU_BASE_URL}/drive/v1/files/{doc_id}",
+                          params={"type": "docx"}, timeout=15)
             logger.info(f"文档已删除: {doc_id}")
             return True
         except FeishuError:

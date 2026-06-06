@@ -2,6 +2,7 @@
 import json
 import logging
 import re
+import time
 from openai import OpenAI
 from config import AGNES_BASE_URL, AGNES_API_KEY, AGNES_MODEL, load_requirements
 from src.prompt_builder import build_mix_prompt, build_oral_prompt, build_review_prompt
@@ -39,7 +40,7 @@ class ScriptGenerator:
         max_retries = 2
         last_error = None
         for attempt in range(max_retries + 1):
-            raw = self._call_api(prompt)
+            raw = self._call_api(prompt, target_chars=target_chars)
             script = self._parse_json(raw, retry_prompt=prompt)
             try:
                 self._validate(script, script_type)
@@ -69,20 +70,43 @@ class ScriptGenerator:
                 variation_seed=i + 1, target_chars=target_chars,
             )
             scripts.append(script)
+            # 节流：避免连续请求打爆 API
+            if i < count - 1:
+                time.sleep(1.5)
         return scripts
 
-    def _call_api(self, prompt: str) -> str:
-        """调用 AI API，返回原始文本."""
-        response = self._client.chat.completions.create(
-            model=AGNES_MODEL,
-            messages=[
-                {"role": "system",
-                 "content": "你是短视频脚本策划。输出纯 JSON，不用 markdown 包裹。"},
-                {"role": "user", "content": prompt},
-            ],
-            max_tokens=4000, temperature=0.3, timeout=120,
-        )
-        return response.choices[0].message.content.strip()
+    def _call_api(self, prompt: str, target_chars: int = 0) -> str:
+        """调用 AI API，返回原始文本，带限流重试。max_tokens 根据目标字数动态限制。"""
+        if target_chars > 0:
+            max_tok = max(1000, int(target_chars * 2.0) + 600)
+        else:
+            max_tok = 2000
+        logger.info("API 调用 max_tokens=%d (target_chars=%d)", max_tok, target_chars)
+
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                response = self._client.chat.completions.create(
+                    model=AGNES_MODEL,
+                    messages=[
+                        {"role": "system",
+                         "content": "你是短视频脚本策划。输出纯 JSON，不用 markdown 包裹。"
+                                    "内容简洁精炼，篇幅严格匹配参考视频。"},
+                        {"role": "user", "content": prompt},
+                    ],
+                    max_tokens=max_tok, temperature=0.3, timeout=120,
+                )
+                return response.choices[0].message.content.strip()
+            except Exception as e:
+                msg = str(e).lower()
+                is_rate_limited = any(kw in msg for kw in
+                    ("429", "rate limit", "too many requests", "503", "service unavailable"))
+                if is_rate_limited and attempt < max_retries - 1:
+                    wait = 0.5 * (2 ** attempt)
+                    logger.warning("API 限流，等待 %.1fs 后重试 (%d/%d)...", wait, attempt + 1, max_retries)
+                    time.sleep(wait)
+                    continue
+                raise
 
     def _parse_json(self, raw: str, retry_prompt: str = "") -> dict:
         """解析 AI 返回的 JSON，失败时触发重试."""
@@ -174,7 +198,7 @@ class ScriptGenerator:
         return script
 
     def _validate(self, script: dict, script_type: str = "mix"):
-        """验证脚本结构，校验阈值对齐 requirements.json."""
+        """验证脚本结构，校验阈值对齐 requirements.json。长度由 max_tokens 控制，不在此校验。"""
         req = load_requirements()
 
         if "title" not in script:

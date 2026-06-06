@@ -135,7 +135,7 @@ def _build_diversity_instruction(seed: int, script_type: str) -> str:
 - 具体措辞、举例、比喻必须与标准版本不同"""
 
 
-def build_mix_prompt(synthesis: str, custom_requirements: str = "",
+def build_mix_prompt(synthesis: str,
                       audio_transcript: str = "", variation_seed: int = 0,
                       target_chars: int = 0) -> str:
     """构建混剪脚本生成的 Prompt。
@@ -163,9 +163,16 @@ def build_mix_prompt(synthesis: str, custom_requirements: str = "",
         hi_chars = int(target_chars * 1.2)
         length_constraint = (
             f"\n## 🔴 内容长度硬性约束\n"
-            f"原视频口播约 **{target_chars} 字**。"
-            f"你的 rows 中所有文案的字数总和必须在 **{lo_chars}-{hi_chars} 字**之间。"
-            f"不要大幅超出或缩水，保持在原视频篇幅的 80%-120% 范围内。"
+            f"原视频口播约 **{target_chars} 字**。\n"
+            f"你的 rows 中所有文案的字数总和 **严禁超过 {hi_chars} 字**，也**不得少于 {lo_chars} 字**。\n"
+            f"生成完逐行统计字数，超出则删减内容，不足则补充。\n"
+            f"**不遵守此约束 = 不合格，必须重做。**"
+        )
+    else:
+        length_constraint = (
+            "\n## 🔴 内容长度约束\n"
+            "参考原视频的长度和节奏，脚本内容应与参考视频篇幅相当。\n"
+            "生成前先估算原视频的大致字数，以该字数为基准输出，不要大幅超出。"
         )
 
     # ==== 广告植入指令（严格） ====
@@ -178,17 +185,12 @@ def build_mix_prompt(synthesis: str, custom_requirements: str = "",
     ]
     ad_block = "\n".join(ad_lines)
 
-    override = ""
-    if custom_requirements and custom_requirements.strip():
-        override = f"\n## 用户自定义要求（最高优先级）\n{custom_requirements.strip()}\n"
-
     diversity = _build_diversity_instruction(variation_seed, "mix")
 
     return f"""你是短视频脚本策划。生成混剪脚本（**单人图文讲解**风格）。
 
 视频画面 + 单人旁白口播 + 趣味素材穿插，每条口播文案配一张对应的素材图片。
 
-{override}
 {diversity}
 {length_constraint}
 ## 视频分析
@@ -228,9 +230,8 @@ def build_mix_prompt(synthesis: str, custom_requirements: str = "",
 {products}"""
 
 
-def build_oral_prompt(synthesis: str, custom_requirements: str = "",
-                      audio_transcript: str = "", variation_seed: int = 0,
-                      target_chars: int = 0) -> str:
+def build_oral_prompt(synthesis: str, audio_transcript: str = "",
+                      variation_seed: int = 0, target_chars: int = 0) -> str:
     """构建口播脚本生成的 Prompt。
 
     强制执行规则：
@@ -254,10 +255,16 @@ def build_oral_prompt(synthesis: str, custom_requirements: str = "",
         hi_chars = int(target_chars * 1.2)
         length_constraint = (
             f"\n## 🔴 内容长度硬性约束\n"
-            f"原视频口播约 **{target_chars} 字**。"
-            f"你的 original_text 字数必须在 **{lo_chars}-{hi_chars} 字**之间，"
-            f"dialogs 中所有对话的字数总和也应在 **{lo_chars}-{hi_chars} 字**之间。"
-            f"不要大幅超出或缩水，保持在原视频篇幅的 80%-120% 范围内。"
+            f"原视频口播约 **{target_chars} 字**。\n"
+            f"你的 original_text 字数 + dialogs 中所有对话字数总和 **严禁超过 {hi_chars} 字**，也**不得少于 {lo_chars} 字**。\n"
+            f"生成完逐条统计字数，超出则删减，不足则补充。\n"
+            f"**不遵守此约束 = 不合格，必须重做。**"
+        )
+    else:
+        length_constraint = (
+            "\n## 🔴 内容长度约束\n"
+            "参考原视频的长度和节奏，脚本内容应与参考视频篇幅相当。\n"
+            "生成前先估算原视频的大致字数，以该字数为基准输出，不要大幅超出。"
         )
 
     # ==== 广告植入指令（严格） ====
@@ -270,10 +277,6 @@ def build_oral_prompt(synthesis: str, custom_requirements: str = "",
         "5. 广告内容的情绪标记应为【推荐】",
     ]
     ad_block = "\n".join(ad_lines)
-
-    override = ""
-    if custom_requirements and custom_requirements.strip():
-        override = f"\n## 用户自定义要求（最高优先级）\n{custom_requirements.strip()}\n"
 
     diversity = _build_diversity_instruction(variation_seed, "oral")
 
@@ -300,7 +303,6 @@ def build_oral_prompt(synthesis: str, custom_requirements: str = "",
 
 {audio_section}
 
-{override}
 {diversity}
 {length_constraint}
 ## 视频分析
