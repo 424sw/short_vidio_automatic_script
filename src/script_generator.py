@@ -4,7 +4,7 @@ import logging
 import re
 from openai import OpenAI
 from config import AGNES_BASE_URL, AGNES_API_KEY, AGNES_MODEL, load_requirements
-from src.prompt_builder import build_mix_prompt, build_oral_prompt
+from src.prompt_builder import build_mix_prompt, build_oral_prompt, build_review_prompt
 
 logger = logging.getLogger(__name__)
 
@@ -20,12 +20,17 @@ class ScriptGenerator:
                              timeout=120.0)
 
     def generate(self, synthesis: str, script_type: str = "mix",
-                 video_title: str = "", audio_transcript: str = "") -> dict:
-        """生成脚本。"""
+                 video_title: str = "", audio_transcript: str = "",
+                 variation_seed: int = 0, target_chars: int = 0) -> dict:
+        """生成脚本。variation_seed > 0 时注入多样性指令。"""
         if script_type == "oral":
-            prompt = build_oral_prompt(synthesis, audio_transcript=audio_transcript)
+            prompt = build_oral_prompt(synthesis, audio_transcript=audio_transcript,
+                                       variation_seed=variation_seed,
+                                       target_chars=target_chars)
         else:
-            prompt = build_mix_prompt(synthesis, audio_transcript=audio_transcript)
+            prompt = build_mix_prompt(synthesis, audio_transcript=audio_transcript,
+                                      variation_seed=variation_seed,
+                                      target_chars=target_chars)
 
         type_label = "口播" if script_type == "oral" else "混剪"
         src = f"（来源: {video_title}）" if video_title else ""
@@ -50,6 +55,21 @@ class ScriptGenerator:
                         + prompt
                     )
         raise last_error
+
+    def generate_multiple(self, synthesis: str, script_type: str, count: int,
+                          video_title: str = "", audio_transcript: str = "",
+                          target_chars: int = 0) -> list[dict]:
+        """批量生成多个差异化脚本。"""
+        scripts = []
+        for i in range(count):
+            logger.info("生成第 %d/%d 个脚本...", i + 1, count)
+            script = self.generate(
+                synthesis, script_type=script_type,
+                video_title=video_title, audio_transcript=audio_transcript,
+                variation_seed=i + 1, target_chars=target_chars,
+            )
+            scripts.append(script)
+        return scripts
 
     def _call_api(self, prompt: str) -> str:
         """调用 AI API，返回原始文本."""
@@ -88,6 +108,71 @@ class ScriptGenerator:
                 return self._parse_json(raw2)
             raise ScriptGeneratorError(f"JSON 解析失败: {e}\n原始输出: {raw[:300]}")
 
+    def detect_type(self, synthesis: str, video_title: str) -> str:
+        """根据视频内容自动检测脚本类型.
+
+        图文类/知识分享类 → 混剪
+        剧情类/对话类/真人出镜 → 口播
+        失败时默认返回 "mix"。
+        """
+        prompt = f"""分析以下视频内容，判断它更适合制作"混剪脚本"还是"口播脚本"。
+
+视频标题: {video_title}
+
+视频综合分析:
+{synthesis[:2000]}
+
+判断标准:
+- 混剪: 适合图文+配音形式，如知识分享、观点输出、干货盘点、情感文案等
+- 口播: 适合真人出镜+对话/独白形式，如剧情、角色对话、采访、Vlog等
+
+只回复一个词: "mix" 或 "oral"."""
+
+        try:
+            response = self._client.chat.completions.create(
+                model=AGNES_MODEL,
+                messages=[{"role": "user", "content": prompt}],
+                max_tokens=10,
+                temperature=0.3,
+                timeout=30,
+            )
+            answer = response.choices[0].message.content.strip().lower()
+            if "oral" in answer or "口播" in answer:
+                return "oral"
+            return "mix"
+        except Exception as e:
+            logger.warning(f"脚本类型检测失败，默认使用混剪: {e}")
+            return "mix"
+
+    def review(self, script: dict, script_type: str, original_prompt: str) -> dict:
+        """AI 自检审核：对照原始 Prompt 逐项校验，修正格式偏差和内容缺失。
+
+        审核失败不阻塞，返回原脚本。
+        """
+        prompt = build_review_prompt(script, script_type, original_prompt)
+        type_label = "口播" if script_type == "oral" else "混剪"
+        logger.info("审核微调%s脚本...", type_label)
+
+        max_retries = 1
+        for attempt in range(max_retries + 1):
+            try:
+                raw = self._call_api(prompt)
+                refined = self._parse_json(raw, retry_prompt=prompt)
+                self._validate(refined, script_type)
+                logger.info("审核微调完成（第 %d 次）", attempt + 1)
+                return refined
+            except (ScriptGeneratorError, json.JSONDecodeError) as e:
+                if attempt < max_retries:
+                    logger.warning("审核校验失败（第 %d/%d 次）: %s，重试中...", attempt + 1, max_retries + 1, e)
+                    prompt = (
+                        f"⚠️ 上一次修正被拒绝，原因：{e}\n"
+                        f"请修正上述问题，重新输出完整的纯 JSON。\n\n"
+                        + prompt
+                    )
+        # 审核失败不阻塞，返回原脚本
+        logger.warning("审核微调未通过校验，使用原脚本: %s", str(e) if 'e' in dir() else "未知错误")
+        return script
+
     def _validate(self, script: dict, script_type: str = "mix"):
         """验证脚本结构，校验阈值对齐 requirements.json."""
         req = load_requirements()
@@ -105,6 +190,13 @@ class ScriptGenerator:
             raise ScriptGeneratorError(
                 f"话题词不足: {len(hashtags)} 个（至少需要 4 个）。"
                 f"请确保生成的话题词为中文短语，如：职场干货、面试技巧、求职")
+        # 话题词中不允许出现品牌名
+        brand = req.get("混剪", {}).get("广告", {}).get("品牌", "鱼泡直聘")
+        for t in hashtags:
+            if brand in t:
+                raise ScriptGeneratorError(
+                    f"话题词「{t}」包含品牌名「{brand}」。"
+                    f"话题词是内容标签，严禁出现品牌名。请替换为通用的内容主题词。")
         script["hashtags"] = hashtags
 
         if script_type == "oral":

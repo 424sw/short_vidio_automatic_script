@@ -1,5 +1,5 @@
 """
-一次性下载 faster-whisper tiny 模型到项目本地。
+一次性下载 faster-whisper small 模型到项目本地。
 
 运行一次后，video_analyzer.py 将直接使用本地模型，不再触发网络下载。
 国内网络下建议先设置镜像：set HF_ENDPOINT=https://hf-mirror.com
@@ -12,8 +12,8 @@ import os
 import sys
 from pathlib import Path
 
-MODEL_DIR = Path(__file__).parent / "models" / "faster-whisper-tiny"
-REPO_ID = "Systran/faster-whisper-tiny"
+MODEL_DIR = Path(__file__).parent / "models" / "faster-whisper-small"
+REPO_ID = "Systran/faster-whisper-small"
 
 
 def download_via_huggingface_hub():
@@ -69,7 +69,7 @@ def verify_model():
 
 def main():
     print("=" * 50)
-    print("  faster-whisper 模型本地化安装")
+    print("  faster-whisper small 模型本地化安装")
     print("=" * 50)
     print()
     print("💡 提示：国内网络建议先设置 HF 镜像：")
@@ -96,10 +96,10 @@ def main():
         print("  手动下载方法")
         print("=" * 50)
         print()
-        print("1. 浏览器打开: https://hf-mirror.com/Systran/faster-whisper-tiny/tree/main")
-        print("   或: https://huggingface.co/Systran/faster-whisper-tiny/tree/main")
+        print("1. 浏览器打开: https://hf-mirror.com/Systran/faster-whisper-small/tree/main")
+        print("   或: https://huggingface.co/Systran/faster-whisper-small/tree/main")
         print()
-        print("2. 下载以下文件到 tools/models/faster-whisper-tiny/:")
+        print("2. 下载以下文件到 tools/models/faster-whisper-small/:")
         print("   - config.json")
         print("   - model.bin")
         print("   - tokenizer.json")

@@ -9,13 +9,13 @@ from pathlib import Path
 
 from openai import OpenAI
 
-from config import AGNES_BASE_URL, AGNES_API_KEY, AGNES_MODEL, FFMPEG_PATH
+from config import AGNES_BASE_URL, AGNES_API_KEY, AGNES_MODEL, FFMPEG_PATH, load_requirements
 from src.prompt_builder import get_quality_config, build_synthesis_prompt
 
 logger = logging.getLogger(__name__)
 
 # 本地模型
-_MODEL_DIR = Path(__file__).parent.parent / "tools" / "models" / "faster-whisper-tiny"
+_MODEL_DIR = Path(__file__).parent.parent / "tools" / "models" / "faster-whisper-small"
 
 
 class VideoAnalysisError(Exception):
@@ -30,13 +30,13 @@ def _make_client():
 # 帧分析（全量单次调用）
 # ============================================================
 
-def _analyze_frames(frame_paths: list[str]) -> list[dict]:
+def _analyze_frames(frame_paths: list[str], quality: str = "standard") -> list[dict]:
     """所有帧打包进一次 API 调用。"""
     if not frame_paths:
         return []
 
     client = _make_client()
-    detail = get_quality_config("standard")["vision_detail"]
+    detail = get_quality_config(quality)["vision_detail"]
     content_blocks = []
     names = []
 
@@ -142,6 +142,69 @@ def _parse_frame_results(raw: str, names: list[str], paths: list[str]) -> list[d
 
 
 # ============================================================
+# Whisper 领域上下文（改善网络热词/行业术语识别）
+# ============================================================
+
+def _build_whisper_initial_prompt() -> str:
+    """构建领域上下文，注入 faster-whisper 以提升行业术语/网络热词识别率。
+
+    Whisper 的 initial_prompt 参数为解码器提供先验词汇偏好，
+    模型在识别时更倾向匹配 prompt 中出现过的词，从而减少「音近错字」。
+    """
+    try:
+        req = load_requirements()
+    except Exception:
+        req = {}
+
+    # 收集品牌名
+    words = []
+    for section in ("混剪", "口播"):
+        brand = req.get(section, {}).get("广告", {}).get("品牌", "")
+        if brand and brand not in words:
+            words.append(brand)
+
+    # 从产品介绍库中提取关键术语
+    products = req.get("产品介绍库", [])
+    for p in products:
+        text = p.get("文案", "") + p.get("主题", "") + p.get("适用场景", "")
+        for term in ["求职", "招聘", "直招", "蓝领", "岗位", "面试", "实习",
+                     "校招", "兼职", "灵活用工", "副业", "培训", "技能",
+                     "工厂", "工地", "制造业", "日结", "周结", "月结"]:
+            if term in text and term not in words:
+                words.append(term)
+
+    # ==== 互联网热词库（基于 2025-2026 真实流行语） ====
+    # 这些词汇不在 Whisper 通用训练集中，极易被识别成音近错字。
+    # 如「主包」→ 主播、「家人们」→ 加入们、「上岸」→ 上暗。
+    hotwords = [
+        # 通用网络用语
+        "主包", "家人们", "宝子们", "老铁", "集美",
+        "绝绝子", "yyds", "emo", "破防", "下头", "上头",
+        "真香", "芭比Q", "栓Q", "离谱", "无语",
+        "摆烂", "躺平", "摸鱼", "内卷", "画饼", "白嫖",
+        "种草", "拔草", "安利", "避坑", "避雷", "捡漏",
+        "韭菜", "割韭菜", "智商税", "显眼包", "社死",
+        "天花板", "平替", "闭眼入", "宝藏", "翻车", "塌房",
+        # 求职 / 职场
+        "上岸", "大厂", "小厂", "offer", "内推", "海投",
+        "面经", "群面", "单面", "简历", "投递",
+        "打工人", "社畜", "裸辞", "跳槽", "转正", "试用期",
+        "五险一金", "薪资", "待遇", "副业", "远程办公",
+        "搞钱", "来财",
+        "牛马", "一身班味", "精神退休", "情绪价值",
+        "全职儿女", "数字游民", "主理人",
+        # 短视频平台 / 内容创作
+        "素材", "文案", "口播", "混剪", "涨粉", "取关",
+    ]
+    for w in hotwords:
+        if w not in words:
+            words.append(w)
+
+    # 构建 prompt（中文逗号分隔，模拟自然语流）
+    return "这是一段关于求职招聘和职场话题的中文视频音频。涉及词汇：" + "，".join(words)
+
+
+# ============================================================
 # 音频转录
 # ============================================================
 
@@ -156,16 +219,19 @@ def _transcribe_audio(audio_path: str) -> str:
 
     model_path = str(_MODEL_DIR) if (
         (_MODEL_DIR / "model.bin").exists() or (_MODEL_DIR / "config.json").exists()
-    ) else "tiny"
-    local_only = model_path != "tiny"
+    ) else "small"
+    local_only = model_path != "small"
 
     logger.info(f"转录音频（{'本地模型' if local_only else '在线下载'}，{dur:.0f} 秒）...")
     try:
         from faster_whisper import WhisperModel
         model = WhisperModel(model_path, device="cpu", compute_type="int8",
                             local_files_only=local_only)
+        initial_prompt = _build_whisper_initial_prompt()
+        logger.info(f"Whisper 领域上下文: {initial_prompt[:80]}...")
         segments, info = model.transcribe(audio_path, language="zh",
-                                           beam_size=5, vad_filter=True)
+                                           beam_size=5, vad_filter=True,
+                                           initial_prompt=initial_prompt)
         text = "".join(s.text.strip() for s in segments)
         if text:
             return f"音频时长: {dur:.1f}秒\n音频转录:\n{text}\n语言: {info.language}\n⚠️ 若转录为繁体，请在下游 AI 步骤中要求转换为简体中文"
@@ -247,7 +313,7 @@ class VideoAnalyzer:
         return str(ap)
 
     def synthesize(self, frame_analyses: list[dict], metadata: dict,
-                   audio_transcript: str = "") -> str:
+                   audio_transcript: str = "", quality: str = "standard") -> str:
         failed_count = sum(
             1 for fa in frame_analyses if fa.get("description", "").startswith("[失败"))
         if failed_count == len(frame_analyses) and frame_analyses:
@@ -262,11 +328,13 @@ class VideoAnalyzer:
         prompt = build_synthesis_prompt(
             len(frame_analyses), metadata.get("title", ""),
             descriptions, audio_transcript)
+        # 质量影响 synthesis 的输出长度
+        synth_tokens = {"fast": 1500, "standard": 3000, "fine": 4000}.get(quality, 3000)
         client = _make_client()
         resp = client.chat.completions.create(
             model=AGNES_MODEL,
             messages=[{"role": "user", "content": prompt}],
-            max_tokens=3000, timeout=120)
+            max_tokens=synth_tokens, timeout=120)
         return resp.choices[0].message.content
 
     def analyze(self, video_path: str, title: str, author: str = "",
@@ -276,23 +344,23 @@ class VideoAnalyzer:
         wd.mkdir(parents=True, exist_ok=True)
 
         try:
-            # 抽帧 + 音频（串行）
+            # 抽帧 + 音频（并行可优化，当前串行）
             logger.info("抽帧 + 音频...")
             frames = self.extract_frames(video_path, str(wd), quality)
             audio_path = self.extract_audio(video_path, str(wd))
 
-            # 转录
+            # 转录（所有模式都执行，这是核心功能）
             audio_transcript = _transcribe_audio(audio_path) if audio_path else ""
 
-            # 帧分析
+            # 帧分析（quality 影响 vision_detail 和帧数）
             logger.info("帧分析...")
-            frame_analysis = _analyze_frames([str(f) for f in frames])
+            frame_analysis = _analyze_frames([str(f) for f in frames], quality)
 
-            # 综合
+            # 综合（quality 影响 max_tokens）
             logger.info("综合理解...")
             synthesis = self.synthesize(frame_analysis,
                                         {"title": title, "author": author},
-                                        audio_transcript)
+                                        audio_transcript, quality)
 
             return {
                 "frame_analysis": frame_analysis,

@@ -429,7 +429,7 @@ class FeishuClient:
         # 重新获取（表格填充可能插入了行），然后更新封面标题
         blocks = self.get_blocks(doc_id)
         block_map = {b["block_id"]: b for b in blocks}
-        cover_title = script.get("title", video_title)
+        cover_title = re.sub(r'\s*#[^\s#]+', '', script.get("title", video_title)).strip()
         self._update_cover_title_bullet(doc_id, blocks, block_map, title=cover_title)
         # 更新交付要求中的【标题】和【正文】字段
         self._update_delivery_fields(doc_id, blocks, block_map,
@@ -557,7 +557,8 @@ class FeishuClient:
 
         # --- Step 5: 更新封面标题 + 交付要求字段 ---
         # 封面要求的"标题"和交付要求的【标题】都不含话题词，【正文】含话题词
-        self._update_cover_title_bullet(doc_id, blocks, block_map, title=oral_title)
+        oral_clean_title = re.sub(r'\s*#[^\s#]+', '', oral_title).strip()
+        self._update_cover_title_bullet(doc_id, blocks, block_map, title=oral_clean_title)
         self._update_delivery_fields(doc_id, blocks, block_map,
                                      title=oral_title,
                                      hashtags=oral_hashtags)
@@ -736,7 +737,15 @@ class FeishuClient:
             hashtags = []
 
         hashtag_str = " ".join(f"#{t.strip('#')}" for t in hashtags) if hashtags else ""
-        body_text = f"{title} {hashtag_str}" if hashtag_str else title
+        # 从 title 中提取不含话题词的干净标题（title 可能已含 "#话题词"）
+        clean_title = re.sub(r'\s*#[^\s#]+', '', title).strip()
+        # 正文：若干净标题与完整 title 相同（无内嵌话题词），则手动拼接
+        if clean_title != title:
+            body_text = title  # title 已含话题词，直接用
+        elif hashtag_str:
+            body_text = f"{title} {hashtag_str}"
+        else:
+            body_text = title
 
         # --- 阶段1: 精确匹配【】标记 ---
         matched = False
@@ -773,9 +782,10 @@ class FeishuClient:
                     base_style["background_color"] = bg
 
                 # 用正则替换标记后的旧内容（两标记在同一 element 内）
+                # 【标题】不含话题词，【正文】含话题词
                 content = re.sub(
                     r'(【标题】：).*?(?=【|\n)',
-                    lambda m: m.group(1) + title,
+                    lambda m: m.group(1) + clean_title,
                     content, count=1)
                 content = re.sub(
                     r'(【正文】：).*?(?=【|\n|$)',
@@ -891,8 +901,8 @@ class FeishuClient:
         title_markers = ["标题：", "标题:", "【标题】", "【标题",
                          "标题】", "标题("]
         if title_target:
-            _replace_after_marker(title_target, title_markers, title)
-            logger.info("已更新交付标题（回退）: %s", title)
+            _replace_after_marker(title_target, title_markers, clean_title)
+            logger.info("已更新交付标题（回退）: %s", clean_title)
 
         # 写入正文
         body_markers = ["正文：", "正文:", "【正文】", "【正文",
