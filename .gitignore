@@ -24,6 +24,12 @@ data/*.jpg
 data/*.png
 data/*.json
 
+# Runtime lock/queue files (concurrency control, never commit)
+data/.running
+data/.queue
+data/.cleanup_done
+data/.expiry_queue
+
 # OS files
 .DS_Store
 Thumbs.db
