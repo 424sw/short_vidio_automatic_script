@@ -120,25 +120,35 @@ def _cleanup_session(sid: str = None):
             logger.info("已清理 session 目录: %s", session_dir)
 
 
-_CLEANUP_MARKER = Path("data/.cleanup_done")
-
-
 def _cleanup_stale_data():
-    """启动时清理 data/ 下所有旧 session 目录。通过文件标记确保进程生命周期内只执行一次。"""
-    if _CLEANUP_MARKER.exists():
+    """每次请求清理 data/ 下超过 10 分钟的旧 session 目录。
+
+    旧设计用 .cleanup_done 标记只运行一次，导致后续异常退出（取消、断开、卡死）
+    的 session 视频/音频文件永久堆积，ModelScope 磁盘被耗尽。
+    """
+    data_dir = Path("data")
+    if not data_dir.exists():
         return
 
-    data_dir = Path("data")
-    data_dir.mkdir(parents=True, exist_ok=True)
-
-    # 清理所有 session 残留目录
+    now = time.time()
+    stale_age = 600  # 10 分钟
+    current_sid = st.session_state.get("session_id", "")
     for item in data_dir.iterdir():
-        if item.is_dir():
-            shutil.rmtree(item, ignore_errors=True)
-            logger.info("启动时清理残留目录: %s", item)
-
-    # 写入标记文件
-    _CLEANUP_MARKER.write_text(str(time.time()))
+        if not item.is_dir():
+            continue
+        # 跳过非 session 目录
+        if item.name.startswith("."):
+            continue
+        # 跳过当前活跃 session
+        if item.name == current_sid:
+            continue
+        try:
+            age = now - item.stat().st_mtime
+            if age > stale_age:
+                shutil.rmtree(item, ignore_errors=True)
+                logger.info("清理残留 session: %s", item)
+        except Exception:
+            pass
 
 
 # ============================================================
