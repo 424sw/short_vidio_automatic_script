@@ -25,12 +25,12 @@ for _mod in [src.douyin_extractor, src.video_analyzer,
              src.script_generator, src.feishu_ops, src.prompt_builder]:
     importlib.reload(_mod)
 
-from src.douyin_extractor import DouyinExtractor, DouyinError
-from src.video_analyzer import VideoAnalyzer, VideoAnalysisError
-from src.script_generator import ScriptGenerator, ScriptGeneratorError
-from src.feishu_ops import FeishuClient, FeishuError
-from src.prompt_builder import build_mix_prompt, build_oral_prompt
-from config import MAX_SCRIPT_COUNT, DOC_TTL_SECONDS
+from src.douyin_extractor import DouyinExtractor, DouyinError  # noqa: E402
+from src.video_analyzer import VideoAnalyzer, VideoAnalysisError  # noqa: E402
+from src.script_generator import ScriptGenerator, ScriptGeneratorError  # noqa: E402
+from src.feishu_ops import FeishuClient, FeishuError  # noqa: E402
+from src.prompt_builder import build_mix_prompt, build_oral_prompt  # noqa: E402
+from config import MAX_SCRIPT_COUNT, DOC_TTL_SECONDS  # noqa: E402
 
 
 st.set_page_config(

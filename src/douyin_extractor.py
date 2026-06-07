@@ -148,7 +148,8 @@ class DouyinExtractor:
             stack = 0
             last_valid = 0
             for i, c in enumerate(raw_json):
-                if c == '{': stack += 1
+                if c == '{':
+                    stack += 1
                 elif c == '}':
                     stack -= 1
                     if stack == 0:

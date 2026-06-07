@@ -4,7 +4,6 @@
 import time
 import json
 import re
-import uuid
 import logging
 import requests
 from typing import Optional
@@ -93,7 +92,7 @@ class FeishuClient:
 
             try:
                 data = resp.json()
-            except Exception as e:
+            except Exception:
                 logger.error(f"JSON 解析失败: {resp.text[:300]}")
                 raise FeishuError(
                     f"飞书 API 返回了非 JSON 内容 (HTTP {resp.status_code})。\n"
