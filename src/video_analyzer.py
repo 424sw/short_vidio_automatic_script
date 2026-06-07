@@ -1,5 +1,6 @@
 """AI 视频分析：音频提取 + 语音转录 → AI 综合理解。"""
 import re
+import sys
 import logging
 import subprocess
 from pathlib import Path
@@ -24,14 +25,21 @@ def _make_client():
     return OpenAI(base_url=AGNES_BASE_URL, api_key=AGNES_API_KEY, timeout=120.0)
 
 
-# ==== Whisper 模型单例（模块级，避免重复加载导致 OOM） ====
-_whisper_models: dict = {}  # {"int8": model, "float32": model}
+# ==== Whisper 模型单例（存入 sys.modules，避免 importlib.reload() 清零） ====
+_MODEL_CACHE_KEY = "_whisper_model_cache"
 
 
 def _get_whisper_model(compute_type: str):
-    """获取 Whisper 模型实例（懒加载，每个 compute_type 只建一次）。"""
-    if compute_type in _whisper_models:
-        return _whisper_models[compute_type]
+    """获取 Whisper 模型实例（懒加载，每个 compute_type 只建一次）。
+
+    模型存在 sys.modules 而非模块级变量中，以免疫 app.py 的 importlib.reload() 清零。
+    """
+    cache = sys.modules.get(_MODEL_CACHE_KEY)
+    if cache is None:
+        cache = {}
+        sys.modules[_MODEL_CACHE_KEY] = cache
+    if compute_type in cache:
+        return cache[compute_type]
 
     model_path = str(_MODEL_DIR) if (
         (_MODEL_DIR / "model.bin").exists() or (_MODEL_DIR / "config.json").exists()
@@ -42,7 +50,7 @@ def _get_whisper_model(compute_type: str):
     logger.info("加载 Whisper 模型（compute=%s, local=%s）...", compute_type, local_only)
     model = WhisperModel(model_path, device="cpu", compute_type=compute_type,
                          local_files_only=local_only)
-    _whisper_models[compute_type] = model
+    cache[compute_type] = model
     return model
 
 
