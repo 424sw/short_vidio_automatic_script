@@ -109,6 +109,13 @@ class FeishuClient:
                 logger.warning(f"飞书限流，等待 {wait}s 后重试...")
                 time.sleep(wait)
                 continue
+            # 95201: 文档元数据还在初始化（刚复制完模板，飞书后台没准备好）
+            if code == 95201 and attempt < RETRY_MAX - 1:
+                wait = RETRY_BACKOFF * (2 ** attempt) + 1.0  # 额外+1s，给后台更多时间
+                logger.warning("飞书文档元数据未就绪(95201)，等待 %.1fs 后重试 (%d/%d)...",
+                              wait, attempt + 1, RETRY_MAX)
+                time.sleep(wait)
+                continue
             # 详细错误日志
             logger.error(f"飞书 API 调用失败: {method} {url}")
             logger.error(f"请求体: {json.dumps(kwargs.get('json', kwargs.get('data', {})), ensure_ascii=False)[:500]}")

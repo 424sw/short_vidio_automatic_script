@@ -2,7 +2,6 @@
 短视频脚本生成系统
 输入抖音链接 → AI 分析 + 类型检测 → 生成脚本 → AI 审核 → 飞书文档（5 步）
 """
-import os
 import time
 import uuid
 import shutil
@@ -107,147 +106,11 @@ def clear_run():
 
 
 # ============================================================
-# 并发控制：文件锁 + FIFO 队列
-# ============================================================
-
-RUNNING_LOCK = Path("data/.running")   # 当前持有者 session_id
-QUEUE_FILE  = Path("data/.queue")      # 等待队列，一行一个 session_id
-
-_LOCK_STALE_SECONDS = 360  # 6 分钟兜底（Whisper 最慢步骤约 5 分钟），浏览器信标负责即时释放
-
-
-def _read_queue() -> list[str]:
-    """读取队列（不含当前持有者）。"""
-    if not QUEUE_FILE.exists():
-        return []
-    return [line.strip() for line in QUEUE_FILE.read_text().splitlines() if line.strip()]
-
-
-def _write_queue(sids: list[str]):
-    """写入队列。"""
-    if sids:
-        QUEUE_FILE.parent.mkdir(parents=True, exist_ok=True)
-        QUEUE_FILE.write_text("\n".join(sids))
-    elif QUEUE_FILE.exists():
-        QUEUE_FILE.unlink(missing_ok=True)
-
-
-def _acquire_lock() -> bool:
-    """⚠️ [排队机制已禁用] 始终返回 True，允许多进程并行。"""
-    return True
-    # ═══════════════════════════════════════════════════════════
-    # 原始文件锁逻辑（已注释，测试完后恢复）
-    # ═══════════════════════════════════════════════════════════
-    # try:
-    #     RUNNING_LOCK.parent.mkdir(parents=True, exist_ok=True)
-    #     fd = os.open(str(RUNNING_LOCK), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-    #     with os.fdopen(fd, "w") as f:
-    #         f.write(st.session_state.get("session_id", ""))
-    #     return True
-    # except FileExistsError:
-    #     # 检查是否僵尸锁
-    #     try:
-    #         age = time.time() - RUNNING_LOCK.stat().st_mtime
-    #         if age > _LOCK_STALE_SECONDS:
-    #             logger.warning("运行锁已过期（%.0f 分钟），强制接管", age / 60)
-    #             RUNNING_LOCK.unlink(missing_ok=True)
-    #             QUEUE_FILE.unlink(missing_ok=True)  # 僵尸持有者的队列也清掉
-    #             fd = os.open(str(RUNNING_LOCK), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-    #             with os.fdopen(fd, "w") as f:
-    #                 f.write(st.session_state.get("session_id", ""))
-    #             return True
-    #     except (FileExistsError, Exception):
-    #         pass
-    #     return False
-
-
-def _join_queue():
-    """⚠️ [排队机制已禁用] 空操作。"""
-    pass
-    # ═══════════════════════════════════════════════════════════
-    # 原始排队逻辑（已注释，测试完后恢复）
-    # ═══════════════════════════════════════════════════════════
-    # q = _read_queue()
-    # sid = st.session_state.get("session_id", "")
-    # if sid and sid not in q:
-    #     q.append(sid)
-    #     _write_queue(q)
-
-
-def _leave_queue():
-    """⚠️ [排队机制已禁用] 空操作。"""
-    pass
-    # ═══════════════════════════════════════════════════════════
-    # 原始离队逻辑（已注释，测试完后恢复）
-    # ═══════════════════════════════════════════════════════════
-    # q = _read_queue()
-    # sid = st.session_state.get("session_id", "")
-    # q = [s for s in q if s != sid]
-    # _write_queue(q)
-
-
-def _is_my_turn() -> bool:
-    """⚠️ [排队机制已禁用] 始终返回 True。"""
-    return True
-    # ═══════════════════════════════════════════════════════════
-    # 原始排队检查逻辑（已注释，测试完后恢复）
-    # ═══════════════════════════════════════════════════════════
-    # q = _read_queue()
-    # sid = st.session_state.get("session_id", "")
-    # if not q:
-    #     return False
-    # if RUNNING_LOCK.exists():
-    #     try:
-    #         age = time.time() - RUNNING_LOCK.stat().st_mtime
-    #         if age > _LOCK_STALE_SECONDS:
-    #             RUNNING_LOCK.unlink(missing_ok=True)
-    #         else:
-    #             return False
-    #     except Exception:
-    #         RUNNING_LOCK.unlink(missing_ok=True)
-    # while q and q[0] != sid:
-    #     logger.info("清理队列僵尸条目: %s", q[0])
-    #     q.pop(0)
-    # _write_queue(q)
-    # return bool(q and q[0] == sid)
-
-
-def _touch_lock():
-    """⚠️ [排队机制已禁用] 空操作。"""
-    pass
-    # ═══════════════════════════════════════════════════════════
-    # 原始心跳逻辑（已注释，测试完后恢复）
-    # ═══════════════════════════════════════════════════════════
-    # if RUNNING_LOCK.exists():
-    #     try:
-    #         RUNNING_LOCK.write_text(st.session_state.get("session_id", ""))
-    #     except Exception:
-    #         pass
-
-
-def _release_lock():
-    """⚠️ [排队机制已禁用] 空操作。"""
-    pass
-    # ═══════════════════════════════════════════════════════════
-    # 原始释放锁逻辑（已注释，测试完后恢复）
-    # ═══════════════════════════════════════════════════════════
-    # sid = st.session_state.get("session_id", "")
-    # if RUNNING_LOCK.exists():
-    #     try:
-    #         current = RUNNING_LOCK.read_text().strip()
-    #         if current == sid:
-    #             RUNNING_LOCK.unlink(missing_ok=True)
-    #     except Exception:
-    #         RUNNING_LOCK.unlink(missing_ok=True)
-    # _leave_queue()
-
-
-# ============================================================
 # Session 清理
 # ============================================================
 
 def _cleanup_session(sid: str = None):
-    """清理 session 临时目录 + 释放运行锁。"""
+    """清理 session 临时目录。"""
     if sid is None:
         sid = st.session_state.get("session_id", "")
     if sid:
@@ -255,34 +118,22 @@ def _cleanup_session(sid: str = None):
         if session_dir.exists():
             shutil.rmtree(session_dir, ignore_errors=True)
             logger.info("已清理 session 目录: %s", session_dir)
-    _release_lock()
 
 
 _CLEANUP_MARKER = Path("data/.cleanup_done")
 
 
 def _cleanup_stale_data():
-    """启动时清理 data/ 下所有旧目录和过期锁。通过文件标记确保进程生命周期内只执行一次。"""
+    """启动时清理 data/ 下所有旧 session 目录。通过文件标记确保进程生命周期内只执行一次。"""
     if _CLEANUP_MARKER.exists():
         return
 
     data_dir = Path("data")
     data_dir.mkdir(parents=True, exist_ok=True)
 
-    # 只清理过期僵尸锁和队列，不碰活跃锁
-    if RUNNING_LOCK.exists():
-        try:
-            age = time.time() - RUNNING_LOCK.stat().st_mtime
-        except Exception:
-            age = 99999
-        if age > _LOCK_STALE_SECONDS:
-            RUNNING_LOCK.unlink(missing_ok=True)
-            QUEUE_FILE.unlink(missing_ok=True)
-            logger.info("启动时清理过期锁+队列（%.0f 分钟前）", age / 60)
-
     # 清理所有 session 残留目录
     for item in data_dir.iterdir():
-        if item.is_dir() and item.name != ".running":
+        if item.is_dir():
             shutil.rmtree(item, ignore_errors=True)
             logger.info("启动时清理残留目录: %s", item)
 
@@ -298,49 +149,31 @@ class StepCancelledError(Exception):
     pass
 
 
+_HEARTBEAT_STALE_SECONDS = 120  # 浏览器 2 分钟未请求 → 视为断开
+
+
 def _check_cancel():
-    """检查用户是否请求取消或浏览器已断开，任一情况抛出异常。"""
+    """检查用户是否请求取消或浏览器会话已断开。
+
+    Streamlit 每 2-3 秒 rerun 一次（进度面板期间）。
+    若超过 _HEARTBEAT_STALE_SECONDS 无请求，说明浏览器已关闭。
+    """
     if st.session_state.get("cancel_requested"):
         raise StepCancelledError("用户取消了生成")
-    # ⚠️ [排队机制已禁用] 信标关闭 → 断连检测无效，跳过
-    # sid = st.session_state.get("session_id", "")
-    # if sid:
-    #     closed = Path(f"data/{sid}/.closed")
-    #     if closed.exists():
-    #         raise StepCancelledError("浏览器已断开")
-    #     seen = Path(f"data/{sid}/.browser_seen")
-    #     if seen.exists() and (time.time() - seen.stat().st_mtime) > 45:
-    #         raise StepCancelledError("浏览器连接超时")
+    sid = st.session_state.get("session_id", "")
+    if sid:
+        hb = Path(f"data/{sid}/.heartbeat")
+        if hb.exists() and (time.time() - hb.stat().st_mtime) > _HEARTBEAT_STALE_SECONDS:
+            raise StepCancelledError("浏览器会话已断开")
 
 
-# ============================================================
-# 浏览器信标：处理 ping/close 请求
-# ============================================================
-
-def _handle_beacon():
-    """⚠️ [排队机制已禁用] 空操作。"""
-    pass
-    # ═══════════════════════════════════════════════════════════
-    # 原始浏览器信标逻辑（已注释，测试完后恢复）
-    # ═══════════════════════════════════════════════════════════
-    # params = st.query_params
-    # sid = params.get("__ping", "") or params.get("__close", "")
-    # if not sid:
-    #     return
-    # ping_file = Path(f"data/{sid}/.browser_seen")
-    # ping_file.parent.mkdir(parents=True, exist_ok=True)
-    # ping_file.touch()
-    # if params.get("__close"):
-    #     closed = Path(f"data/{sid}/.closed")
-    #     closed.parent.mkdir(parents=True, exist_ok=True)
-    #     closed.touch()
-    #     if RUNNING_LOCK.exists():
-    #         lock_sid = RUNNING_LOCK.read_text().strip()
-    #         if lock_sid == sid:
-    #             RUNNING_LOCK.unlink(missing_ok=True)
-    #             QUEUE_FILE.unlink(missing_ok=True)
-
-
+def _touch_heartbeat():
+    """在每个步骤开始时刷新心跳，防止长步骤被误判为浏览器断连。"""
+    sid = st.session_state.get("session_id", "")
+    if sid:
+        hb = Path(f"data/{sid}/.heartbeat")
+        hb.parent.mkdir(parents=True, exist_ok=True)
+        hb.touch()
 
 
 # ============================================================
@@ -380,9 +213,9 @@ def render_input_panel():
     with col_quality:
         quality = st.selectbox(
             "输出质量",
-            options=["fast", "standard", "fine"],
-            format_func=lambda x: {"fast": "快速", "standard": "标准", "fine": "精细"}[x],
-            index=1,
+            options=["standard", "fine"],
+            format_func=lambda x: {"standard": "标准", "fine": "精细"}[x],
+            index=0,
             key="input_quality",
         )
         st.session_state.quality = quality
@@ -398,7 +231,6 @@ def render_input_panel():
         disabled=not bool(video_url.strip()),
     )
     if clicked:
-        # ⚠️ [排队机制已禁用] 直接进入管道
         _type = st.session_state.script_type_selection
         _quality = st.session_state.quality
         _count = min(st.session_state.script_count, MAX_SCRIPT_COUNT)
@@ -409,45 +241,6 @@ def render_input_panel():
         st.session_state.script_count = _count
         st.session_state.step = 1
         st.rerun()
-        # ═══════════════════════════════════════════════════════════
-        # 原始排队逻辑（已注释，测试完后恢复）
-        # ═══════════════════════════════════════════════════════════
-        # if not _acquire_lock():
-        #     # 其他用户正在运行 → 加入 FIFO 队列等待
-        #     st.session_state.video_url = video_url.strip()
-        #     st.session_state.script_type_selection = script_type_selection
-        #     st.session_state.quality = quality
-        #     st.session_state.script_count = script_count
-        #     _join_queue()
-        #     st.session_state.step = -1
-        #     st.rerun()
-
-
-# ============================================================
-# 排队等待面板（其他用户正在运行时）
-# ============================================================
-def render_waiting_panel():
-    """⚠️ [排队机制已禁用] 直接回到输入面板。"""
-    _url = st.session_state.get("video_url", "")
-    clear_run()
-    st.session_state.video_url = _url
-    st.session_state.step = 0
-    st.rerun()
-    # ═══════════════════════════════════════════════════════════
-    # 原始等待面板逻辑（已注释，测试完后恢复）
-    # ═══════════════════════════════════════════════════════════
-    # q = _read_queue()
-    # sid = st.session_state.get("session_id", "")
-    # if sid not in q:
-    #     st.warning("排队已失效，请重新提交。")
-    #     clear_run()
-    #     st.rerun()
-    # position = q.index(sid) + 1 if sid in q else len(q) + 1
-    # st.info(f"⏳ **排队中，前方 {position - 1} 人...**")
-    # ...
-    # time.sleep(2)
-    # if _is_my_turn() and _acquire_lock():
-    #     ...
 
 
 # ============================================================
@@ -595,46 +388,24 @@ def _expire_documents(doc_ids: list = None):
 
 STEP_LABELS = {
     1: ("① 提取视频", "正在下载抖音视频并提取标题/作者..."),
-    2: ("② AI 分析", "正在抽帧、语音转文字、AI 综合分析..."),
+    2: ("② AI 分析", "正在语音转文字、AI 综合分析..."),
     3: ("③ 生成脚本", "正在根据分析结果生成脚本..."),
     4: ("④ 审核微调", "AI 正在逐项审核并修正脚本..."),
     5: ("⑤ 飞书文档", "正在创建飞书文档并填充脚本内容..."),
 }
 
-# 不同质量等级的时间估算
-_EST_FAST = {1: "约 5-10 秒", 2: "约 45-90 秒", 3: "约 8-15 秒", 4: "约 5-10 秒", 5: "约 5-10 秒"}
-_EST_STD  = {1: "约 5-10 秒", 2: "约 60-120 秒", 3: "约 10-25 秒", 4: "约 5-15 秒", 5: "约 5-12 秒"}
-_EST_FINE = {1: "约 5-10 秒", 2: "约 2-4 分钟", 3: "约 15-30 秒", 4: "约 5-15 秒", 5: "约 5-15 秒"}
+# 不同质量等级的时间估算（精细模式使用更好的语音转文字模型，耗时更长）
+_EST_STD  = {1: "约 5-10 秒", 2: "约 60-120 秒", 3: "约 10-25 秒", 4: "约 30-60 秒", 5: "约 5-12 秒"}
+_EST_FINE = {1: "约 5-10 秒", 2: "约 90-180 秒", 3: "约 15-30 秒", 4: "约 30-60 秒", 5: "约 5-15 秒"}
 
 def _get_step_estimates():
     q = st.session_state.get("quality", "standard")
-    return {"fast": _EST_FAST, "standard": _EST_STD, "fine": _EST_FINE}.get(q, _EST_STD)
+    return {"standard": _EST_STD, "fine": _EST_FINE}.get(q, _EST_STD)
 
 def render_progress_panel():
     step = st.session_state.step
     label, desc = STEP_LABELS.get(step, ("处理中...", ""))
     estimate = _get_step_estimates().get(step, "")
-
-    # ⚠️ [排队机制已禁用] 心跳和信标均跳过
-    # _touch_lock()
-
-    # ⚠️ [排队机制已禁用] 不注入浏览器存活信标
-    # sid = st.session_state.session_id
-    # st.components.v1.html(f"""
-    # <script>
-    # (function() {{
-    #     const sid = '{sid}';
-    #     if (window.__beaconInstalled) return;
-    #     window.__beaconInstalled = true;
-    #     const fe = (k) => fetch('/?__' + k + '=' + sid, {{keepalive: true}});
-    #     setInterval(() => fe('ping'), 15000);
-    #     const close = () => fe('close');
-    #     window.addEventListener('pagehide', close);
-    #     window.addEventListener('beforeunload', close);
-    #     fe('ping');
-    # }})();
-    # </script>
-    # """, height=0)
 
     # 进度条
     st.progress((step - 1) / 5, text=f"步骤 {step}/5")
@@ -706,6 +477,7 @@ def _session_dir() -> Path:
 def step1_extract():
     st.session_state.status_msg = "正在获取抖音视频..."
     try:
+        _touch_heartbeat()
         _check_cancel()
         downloads = _session_dir() / "downloads"
         downloads.mkdir(parents=True, exist_ok=True)
@@ -734,6 +506,7 @@ def step1_extract():
 def step2_analyze():
     st.session_state.status_msg = "AI 分析中..."
     try:
+        _touch_heartbeat()
         _check_cancel()
         analyzer = VideoAnalyzer()
         sdir = str(_session_dir())
@@ -741,11 +514,10 @@ def step2_analyze():
             st.session_state.video_path,
             st.session_state.video_title,
             st.session_state.video_author,
-            quality=st.session_state.get("quality", "standard"),
             session_dir=sdir,
+            quality=st.session_state.get("quality", "standard"),
         )
         _check_cancel()
-        frame_count = len(result.get("frame_analysis", []))
         audio_text = result.get("audio_transcript", "")
         audio_note = "（含语音转文字）" if audio_text and "转录" in audio_text else ""
         st.session_state.synthesis = result["synthesis"]
@@ -755,15 +527,15 @@ def step2_analyze():
         selection = st.session_state.get("script_type_selection", "auto")
         if selection == "auto":
             gen = ScriptGenerator()
-            detected = gen.detect_type(result["synthesis"], st.session_state.video_title)
+            detected = gen.detect_type(result["synthesis"], st.session_state.video_title, audio_text)
             st.session_state.script_type = detected
             logger.info("自动检测脚本类型: %s", detected)
         else:
             st.session_state.script_type = selection
 
         st.session_state.step = 3
-        st.session_state.status_msg = f"分析完成: {frame_count} 帧 {audio_note}"
-        logger.info(f"AI 分析完成: {frame_count} 帧")
+        st.session_state.status_msg = f"分析完成 {audio_note}"
+        logger.info("AI 分析完成")
     except StepCancelledError:
         raise
     except VideoAnalysisError as e:
@@ -830,6 +602,7 @@ def step3_generate():
             st.session_state.target_chars = target_chars
             logger.info("无音频转录，根据时长估算字数: %d", target_chars)
 
+        _touch_heartbeat()
         _check_cancel()
 
         if script_count == 1:
@@ -869,6 +642,7 @@ def step4_review():
     st.session_state.status_msg = "AI 正在审核主脚本..." if total > 1 else "AI 正在审核脚本..."
 
     try:
+        _touch_heartbeat()
         _check_cancel()
         gen = ScriptGenerator()
         audio_transcript = st.session_state.get("audio_transcript", "")
@@ -881,7 +655,11 @@ def step4_review():
                 st.session_state.synthesis, audio_transcript=audio_transcript,
                 target_chars=st.session_state.get("target_chars", 0))
 
-        refined = gen.review(script, script_type, original_prompt)
+        refined, note = gen.review(
+            script, script_type, original_prompt,
+            synthesis=st.session_state.get("synthesis", ""),
+            audio_transcript=st.session_state.get("audio_transcript", ""),
+            target_chars=st.session_state.get("target_chars", 0))
         st.session_state.script_json = refined
         # 更新 script_jsons 中的主脚本
         scripts = st.session_state.get("script_jsons", [])
@@ -889,18 +667,14 @@ def step4_review():
             scripts[0] = refined
             st.session_state.script_jsons = scripts
         st.session_state.step = 5
-        st.session_state.status_msg = "审核完成，脚本已修正"
-        logger.info("审核微调成功，脚本已修正")
+        st.session_state.status_msg = f"审核完成：{note}"
+        logger.info("审核微调: %s", note)
     except StepCancelledError:
         raise
-    except ScriptGeneratorError as e:
-        logger.warning("审核微调未通过校验，使用原脚本: %s", e)
-        st.session_state.step = 5
-        st.session_state.status_msg = "审核跳过，使用原脚本"
     except Exception as e:
-        logger.warning("审核微调异常，使用原脚本: %s", e)
+        logger.warning("审核微调异常: %s", e)
         st.session_state.step = 5
-        st.session_state.status_msg = "审核跳过，使用原脚本"
+        st.session_state.status_msg = "审核跳过（异常），使用原始脚本"
 
 
 def step5_feishu():
@@ -910,6 +684,7 @@ def step5_feishu():
     total = len(scripts)
     st.session_state.status_msg = f"正在创建飞书文档（1/{total}）..." if total > 1 else "正在创建飞书文档..."
     try:
+        _touch_heartbeat()
         client = _get_feishu_client()
         doc_urls = []
         created_ids = []
@@ -951,7 +726,6 @@ def step5_feishu():
             if failed_count == total:
                 st.session_state.error = "所有飞书文档创建均失败，请稍后重试。"
                 st.session_state.step = 0
-                _release_lock()
                 return
             st.session_state.status_msg = f"{status}，{failed_count} 个失败"
         logger.info("飞书文档创建完成: %d/%d", len(doc_urls), total)
@@ -981,8 +755,14 @@ def main():
     # 启动清理：清除上次运行的残留数据（模块级全局变量确保整个进程只执行一次）
     _cleanup_stale_data()
 
-    # 处理浏览器信标 + 过期文档清理（每次请求都检查）
-    # _handle_beacon()  # ⚠️ [排队机制已禁用]
+    # 心跳：每次 rerun 刷新存活时间，供 _check_cancel() 检测浏览器断连
+    sid = st.session_state.get("session_id", "")
+    if sid:
+        hb = Path(f"data/{sid}/.heartbeat")
+        hb.parent.mkdir(parents=True, exist_ok=True)
+        hb.touch()
+
+    # 过期文档清理（每次请求都检查）
     _cleanup_expired_docs()
 
     st.markdown("""
@@ -1011,8 +791,6 @@ def main():
 
     if step == 0:
         render_input_panel()
-    elif step == -1:
-        render_waiting_panel()
     elif step in (1, 2, 3, 4, 5):
         render_progress_panel()
     elif step == 6:

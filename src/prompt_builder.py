@@ -23,43 +23,35 @@ def _build_product_section() -> str:
 
 
 def get_quality_config(quality: str = "standard") -> dict:
-    """质量配置：fast / standard / fine 三档。
+    """质量配置：standard / fine 两档。
 
-    影响抽帧数量上限和逐帧描述详细程度。
+    standard → int8 + beam=5（更快）；fine → float32 + beam=10（更准）。
     """
     presets = {
-        "fast": {
-            "label": "快速",
-            "max_frames": 5,
-            "est_time": "约 30-60 秒",
-            "vision_detail": "简要描述画面关键元素、文字、人物",
-        },
         "standard": {
             "label": "标准",
-            "max_frames": 10,
-            "est_time": "约 1-2 分钟",
-            "vision_detail": "详细描述画面内容、文字、构图",
+            "compute_type": "int8",
+            "beam_size": 5,
+            "est_asr_time": "约 60-120 秒",
         },
         "fine": {
             "label": "精细",
-            "max_frames": 20,
-            "est_time": "约 2-4 分钟",
-            "vision_detail": "尽可能详细地描述所有可见细节，包括人物微表情、画面色调、字体样式、构图逻辑",
+            "compute_type": "float32",
+            "beam_size": 10,
+            "est_asr_time": "约 90-180 秒",
         },
     }
     return presets.get(quality, presets["standard"])
 
 
-def build_synthesis_prompt(frame_count: int, video_title: str,
-                           descriptions: str, audio_transcript: str = "") -> str:
-    """构建视频综合分析的 Prompt."""
+def build_synthesis_prompt(video_title: str, audio_transcript: str = "") -> str:
+    """构建视频综合分析的 Prompt（基于音频转录，不分析视频帧）。"""
     if audio_transcript:
-        audio_hint = "，以及音频转录文字"
         audio_inst = (
-            "根据音频转录文字和画面内容，还原视频完整口播文案，标注时间节点。\n\n"
+            "根据音频转录文字，还原视频完整口播文案，标注时间节点。\n\n"
             "## 🔴 转录纠错（重要）\n"
             "音频转录由机器自动生成，**必然存在识别错误**（尤其是网络热词、品牌名、行业术语）。"
-            "你需要结合画面帧内容和上下文，**修复以下典型错误**：\n"
+            "你需要**修复以下典型错误**：\n"
             "- 音近错字：如「主包」应为「主播」、「加入们」应为「家人们」\n"
             "- 品牌名错误：如「渔泡直聘」应为「鱼泡直聘」\n"
             "- 中英混杂词拆错：如「offer」被识别为「哦分」、「yyds」被识别为「歪歪地爱思」\n"
@@ -68,10 +60,10 @@ def build_synthesis_prompt(frame_count: int, video_title: str,
             f"音频转录：\n{audio_transcript}"
         )
     else:
-        audio_hint = ""
-        audio_inst = "根据画面文字和场景推测口播文案，标注时间节点。"
+        audio_inst = "尝试推测视频的口播文案结构。"
 
-    return f"""你是短视频内容分析师。请分析视频"{video_title}"的 {frame_count} 张关键帧{audio_hint}。
+    transcript_note = "（附有语音转录文字）" if audio_transcript else ""
+    return f"""你是短视频内容分析师。请分析视频"{video_title}"{transcript_note}。
 
 ## 一、视频结构
 开头钩子 → 中间展开 → 结尾总结（标注时间线）
@@ -80,12 +72,10 @@ def build_synthesis_prompt(frame_count: int, video_title: str,
 {audio_inst}
 
 ## 三、风格特点
-视觉风格、节奏、情绪基调
+节奏、情绪基调、语言风格
 
 ## 四、关键信息点
-5-8 个核心信息点
-
-逐帧描述：\n{descriptions}"""
+5-8 个核心信息点"""
 
 
 def _build_diversity_instruction(seed: int, script_type: str) -> str:
@@ -215,6 +205,8 @@ def build_mix_prompt(synthesis: str,
 - 🔴 **内容长度与参考视频相当**：仿写内容的总篇幅（字数、行数、信息量）应与上方视频分析中的原视频文案长度一致，不要大幅超出或缩水
 - 风格：**单人讲解**，口语化，仿佛对着镜头跟观众聊天
 - 每行文案必须是**一段完整的口语内容**（2-5句话），用自然换行（\\\\n）分隔来表示语言停顿，严禁任何标点符号
+- 🔴 **人机感（硬性）**：像真人说话，不要写成文章。大量用口语词（呢、吧、啊、嘛），多用反问和感叹，句式长短错落（短句2-4字+长句15-25字交替），严禁「此外/因此/综上所述/值得注意的是」等公文套话
+- 🔴 **措辞差异化**：核心观点可一致，但具体措辞、举例、比喻必须与参考视频不同，不得大段照搬原文
 - 素材格式：{m.get('素材格式', '文件名.jpg 中文描述')}
 - 素材风格：{m.get('素材风格', '尽量使用动物、表情包等趣味素材')}，每条素材与对应文案内容匹配
 - 🔴 话题词：**必须正好 4-5 个**独立的中文短语，如：职场干货、面试技巧、求职指南、零基础转行
@@ -243,10 +235,16 @@ def build_oral_prompt(synthesis: str, audio_transcript: str = "",
     """
     req = load_requirements()
     o = req["口播"]
-    dialog_count = o.get("对话轮数", 20)
+    dia_range = o.get("对话轮数范围", [8, 20])
+    dia_lo, dia_hi = dia_range[0], dia_range[1]
+    # 根据参考视频长度计算建议轮数：每15字≈1轮对话
+    if target_chars > 0:
+        suggested = max(dia_lo, min(dia_hi, target_chars // 15))
+    else:
+        suggested = (dia_lo + dia_hi) // 2
+    mid = suggested // 2
     emotions = "、".join(o.get("情绪选项", []))
     products = _build_product_section()
-    mid_dialog = dialog_count // 2
 
     # ==== 内容长度约束（硬性） ====
     length_constraint = ""
@@ -256,22 +254,22 @@ def build_oral_prompt(synthesis: str, audio_transcript: str = "",
         length_constraint = (
             f"\n## 🔴 内容长度硬性约束\n"
             f"原视频口播约 **{target_chars} 字**。\n"
-            f"你的 original_text 字数 + dialogs 中所有对话字数总和 **严禁超过 {hi_chars} 字**，也**不得少于 {lo_chars} 字**。\n"
-            f"生成完逐条统计字数，超出则删减，不足则补充。\n"
-            f"**不遵守此约束 = 不合格，必须重做。**"
+            f"- **original_text（原片文案）**：不做字数限制，**完整还原**参考视频的全部口播文案即可\n"
+            f"- **dialogs（A/B 对话脚本）**：所有对话字数总和在 **{lo_chars}~{hi_chars} 字**之间，与参考视频篇幅匹配\n"
+            f"生成完统计 dialogs 总字数，超出必须删减，不足可以适当补充。**不遵守此约束 = 不合格，必须重做。**"
         )
     else:
         length_constraint = (
             "\n## 🔴 内容长度约束\n"
-            "参考原视频的长度和节奏，脚本内容应与参考视频篇幅相当。\n"
-            "生成前先估算原视频的大致字数，以该字数为基准输出，不要大幅超出。"
+            "参考原视频的长度和节奏，dialogs 脚本内容应与参考视频篇幅相当。\n"
+            "original_text 不限字数，完整还原参考视频全部口播文案。"
         )
 
     # ==== 广告植入指令（严格） ====
     ad_lines = [
         "## 🔴 广告植入（硬性要求，必须全部满足）",
         "1. 品牌：**鱼泡直聘**（软广植入）",
-        f"2. 必须在对话的**前50%轮次**（即第1轮到第{mid_dialog}轮之间），由某个角色首次提及「鱼泡直聘」",
+        f"2. 必须在对话的**前50%轮次**（即第1轮到第{mid}轮之间），由某个角色首次提及「鱼泡直聘」",
         "3. 「鱼泡直聘」必须是整个脚本中**第一个**被谈及的商业品牌/产品",
         "4. 提及「鱼泡直聘」后，该角色必须紧接着从下方📦产品介绍库中选择**最匹配**的一段文案（约20-40字），自然地融入对话",
         "5. 广告内容的情绪标记应为【推荐】",
@@ -284,7 +282,7 @@ def build_oral_prompt(synthesis: str, audio_transcript: str = "",
     if audio_transcript:
         audio_section = f"""## 🔴 原始音频转录（参考材料）
 下面是语音转文字得到的原始音频内容，**必然存在识别错误**（机器 ASR 对网络热词、品牌名、中英混杂词的识别率很低）。
-你需要结合画面帧分析，**逐句修复并还原**出完整、逻辑连贯的视频口播文案。
+你需要结合音频转录上下文，**逐句修复并还原**出完整、逻辑连贯的视频口播文案。
 🔴 若转录含繁体字，**必须全部转为简体中文**。
 **修复重点**（这些是 ASR 最常犯的错误）：
 - 音近错字：如「主包」→「主播」、「加入们」→「家人们」、「渔泡」→「鱼泡」
@@ -295,11 +293,18 @@ def build_oral_prompt(synthesis: str, audio_transcript: str = "",
 - 最终 original_text 应该是**一段逻辑清晰、可独立阅读的完整文案**，不是对原始转录的照抄
 {audio_transcript}"""
     else:
-        audio_section = "## ⚠️ 无音频转录\n本视频无语音转文字内容，请仅根据画面帧分析来创作 original_text。"
+        audio_section = "## ⚠️ 无音频转录\n本视频无语音转文字内容，请仅根据视频标题和分析上下文来创作 original_text。"
 
     return f"""你是短视频脚本策划。生成口播脚本（**A/B角色对话**风格）。
 
 两个角色通过对话形式讨论话题，不需要大量配图，仅保留少量关键图片素材作为视觉补充。
+
+## 🔴🔴 核心原则：仿写，不是扩写！
+- 你的任务是**模仿**参考视频的风格、结构、信息密度来创作一个**新**脚本
+- **不是**把参考视频的内容拉长、展开、润色（那是扩写，会被拒绝）
+- 参考视频说多少字，你就说多少字。参考视频用多快的节奏，你就用多快的节奏
+- 核心观点可以一致，但**具体措辞、举例、比喻、句式必须完全不同**
+- 把自己想象成：看了这个视频后，用自己的话复述一遍，而不是对着原文做 paraphrase
 
 {audio_section}
 
@@ -310,9 +315,9 @@ def build_oral_prompt(synthesis: str, audio_transcript: str = "",
 
 ## 输出格式（纯 JSON，不用 markdown 代码块包裹）
 {{{{
-  "title": "标题（15-25字）",
+  "title": "标题（15-25字，纯标题文本，不含#话题词）",
   "hashtags": ["话题词1", "话题词2", "话题词3", "话题词4"],
-  "original_text": "根据音频转录和帧分析还原的完整口播文案，逻辑通顺、无识别错误",
+  "original_text": "根据音频转录和上下文还原的完整口播文案，逻辑通顺、无识别错误",
   "dialogs": [
     ["A", "多句话的完整对话内容，不能只有一句【4字标记】"],
     ["B", "多句话的完整对话内容，不能只有一句【4字标记】"]
@@ -323,16 +328,26 @@ def build_oral_prompt(synthesis: str, audio_transcript: str = "",
 }}}}
 
 ## 对话要求
-- **必须正好 {dialog_count} 轮** A/B 角色对话
+- **必须正好 {suggested} 轮左右（{dia_lo}-{dia_hi} 之间）A/B 角色对话
 - 对话结构：{o.get('对话结构', '开场几轮抛出问题 → 中间几轮给出干货建议 → 后半段深化理解 → 结尾积极号召收尾')}
 - 🔴 角色名**只能是 "A" 和 "B"**（纯字母），**绝对不能**写成 "角色A"、"角色B"、"**A**" 等任何变体
 - 🔴 **每轮对话必须是 3-5 句话的完整大段表达**，包含观点、铺垫、回应、递进，**严禁**单句对话（单句是不合格的输出）
-- 🔴 **对话内容必须基于 original_text 展开**，覆盖原文所有关键信息点，不要凭空编造
-- 情绪标记放在每轮对话内容的末尾，用【】包裹
-- 🔴 **标记以 4 字为主**（如：【热心推荐】【恍然大悟】【疑惑不解】【无奈摇头】），可以是动作、情绪、描述，不限于情绪词
+- 🔴 **对话内容必须覆盖原文所有关键信息点**，但用**不同的措辞和表述方式**，不要照搬 original_text 的句子结构
+- 🔴🔴 **每轮对话末尾必须有【标记】**：用【】包裹 2-4 字的情绪/动作/描述词（如【恍然大悟】【好奇追问】【无奈摇头】【真诚推荐】），**没有标记的对话会被验证步骤直接拒绝**
 - 可选标记可参考：{emotions}
 - **对话内容用标点符号正常断句**（口播是对白，需标点表达语气停顿）
 - 对话要口语化、有互动感，A/B角色交替出现
+
+## 🔴 人机感要求（硬性）
+- **像真人聊天，不要写成文章**：大量使用口语词（呢、吧、啊、嘛、哦、啦、呗），多用反问、感叹、语气词
+- **严禁书面语/官方腔**：不要用「此外」「因此」「综上所述」「值得注意的是」「由此可见」等公文套话
+- **句式长短错落**：短句 2-4 字 + 长句 15-25 字交替，不要每句都工整对称
+- **有真实互动感**：角色之间有追问、打断、认同、质疑等自然互动，不要像在念稿
+- **措辞差异化**：你的文案和参考视频的核心观点可以一致，但具体措辞、举例、比喻必须不同，不得大段照搬原文
+
+## 🔴 标题要求
+- 标题 15-25 字，**纯标题文本，不包含 #话题词**
+- 话题词单独放在 hashtags 数组中
 
 ## 图片素材要求
 - 🔴 **只需 2-3 条**图片素材（文字描述即可，系统不支持插入实际图片）
@@ -345,41 +360,61 @@ def build_oral_prompt(synthesis: str, audio_transcript: str = "",
 - 4-5个中文短语话题词
 - 格式如：职场干货 #面试技巧 #求职
 
+## 🔴 写后自查（输出前逐项确认）
+- [ ] dialogs 总字数是否与参考视频字数在同一量级？超出即删（original_text 不限字数，完整还原即可）
+- [ ] 每轮对话末尾是否都有【标记】？
+- [ ] 措辞是否与原文明显不同？（逐句对比，相似则改）
+- [ ] 对话是否像真人聊天？（有语气词、有互动、不书面）
+- [ ] 标题是否不含 #话题词？
+
 {ad_block}
 {products}"""
 
 
 def build_review_prompt(script_json: dict, script_type: str,
-                        original_prompt: str) -> str:
+                        original_prompt: str, similarity: float = 0.0,
+                        ref_word_count: int = 0) -> str:
     """构建 AI 审核微调的 Prompt。
 
     将已生成的脚本 JSON 连同原始生成 Prompt 回传给 AI，
     要求逐项对照校验，自动修正格式偏差和内容缺失。
+
+    Args:
+        script_json: 已生成的脚本 JSON
+        script_type: "mix" 或 "oral"
+        original_prompt: 原始生成 Prompt
+        similarity: 脚本与参考视频的相似度（0-1），0 表示未计算
+        ref_word_count: 参考视频的口播字数，0 表示未计算
     """
     req = load_requirements()
     script_text = json.dumps(script_json, ensure_ascii=False, indent=2)
 
     if script_type == "oral":
         o = req.get("口播", {})
-        dialog_count = o.get("对话轮数", 20)
+        dia_range = o.get("对话轮数范围", [8, 20])
+        dia_lo, dia_hi = dia_range[0], dia_range[1]
+        suggested = max(dia_lo, min(dia_hi, ref_word_count // 15)) if ref_word_count > 0 else (dia_lo + dia_hi) // 2
+        mid = suggested // 2
         checklist = f"""## 🔴 逐项审核清单（口播脚本）
 
-1. **标题**：15-25字，不包含话题词
+1. **标题**：15-25字，纯标题文本，不包含 #话题词
 2. **hashtags**：正好 4-5 个中文短语，**严禁包含品牌名**（如鱼泡直聘）
 3. **original_text**：完整、通顺、逻辑连贯的文案，无 ASR 识别错误（如「主包→主播」）
 4. **dialogs**：
-   - 必须正好 {dialog_count} 轮
+   - 在 {dia_lo}-{dia_hi} 轮之间（{suggested} 轮左右）
    - 角色名只能写 "A" 和 "B"（纯字母），不是「角色A」「**A**」
    - 每轮 3-5 句完整大段对话，严禁单句敷衍
-   - 每轮末尾有【4字标记】（如【热心推荐】【恍然大悟】）
+   - 每轮末尾有【2-4字标记】（如【热心推荐】【恍然大悟】），没有标记的对话必须补上
    - 对话覆盖 original_text 所有关键信息点
    - 使用标点符号正常断句
 5. **images**：只需 2-3 条，官方/品牌风格（APP图标、截图、数据图表），**严禁**表情包/动物/卡通
 6. **广告植入**：
-   - 品牌「鱼泡直聘」必须在前50%轮次（1~{dialog_count // 2}轮）首次出现
+   - 品牌「鱼泡直聘」必须在前50%轮次（1~{mid}轮）首次出现
    - 必须是第一个被谈及的商业品牌
    - 品牌名后紧跟一段产品介绍库中的匹配文案（20-40字）
-   - 广告内容的情绪标记为【推荐】"""
+   - 广告内容的情绪标记为【推荐】
+7. **内容长度**：dialogs 总字数与参考视频口播字数在同一量级（80%-120%），不得大幅超出或缩水。**original_text 不限字数**，完整还原即可
+8. 🔴 **人机感**：对话像真人聊天，有口语词（呢、吧、啊、嘛）、有互动感、句式长短错落，严禁「此外/因此/综上所述」等书面语套话"""
     else:
         m = req.get("混剪", {})
         lo, hi = m.get("行数范围", [10, 16])
@@ -388,13 +423,30 @@ def build_review_prompt(script_json: dict, script_type: str,
 1. **标题**：15-25字，**必须包含 #话题词**（如「零基础转行面试三大秘诀 #职场干货 #面试技巧」）
 2. **hashtags**：正好 4-5 个中文短语，**严禁包含品牌名**（如鱼泡直聘）
 3. **rows**：在 [{lo}, {hi}] 行范围内
-4. **每行** = [口播文案, 素材描述]，文案用 \\\\n 换行替代标点，**严禁任何标点符号**
+4. **每行** = [口播文案, 素材描述]，文案用 \n 换行替代标点，**严禁任何标点符号**
 5. **素材**：动物/表情包等趣味风格，与文案内容匹配
 6. **广告植入**：
    - 品牌「鱼泡直聘」必须在前50%行（1~{hi // 2}行）首次出现
    - 必须是第一个被谈及的商业品牌
    - 品牌名后紧跟一段产品介绍库中的匹配文案（20-40字）
-7. **内容篇幅**：与上方视频分析中的原视频文案长度一致，不大幅超出或缩水"""
+7. **内容篇幅**：rows 中所有文案字数总和，与参考视频口播字数在同一量级，不得超过参考视频字数的 120%
+8. 🔴 **人机感**：文案像真人说话，有口语词（呢、吧、啊、嘛）、有情绪起伏、句式长短错落，严禁「此外/因此/综上所述」等书面语套话"""
+
+    # 构建相似度警告
+    if similarity > 0:
+        if similarity > 0.4:
+            similarity_warning = (
+                f"⚠️ 当前脚本与参考视频的内容相似度为 {similarity*100:.0f}%，超过 40% 上限。\n"
+                f"请大幅改写脚本：更换比喻、举例、句式结构，用不同的表达方式传达相同的核心观点。\n"
+                f"具体做法：换掉原文中的具体数据和案例，用你自己创造的同类素材替代；\n"
+                f"改写至少 60% 的句子，改变句式结构（如把陈述句改成反问句，把长句拆成短句等）。"
+            )
+        else:
+            similarity_warning = (
+                f"当前脚本与参考视频的内容相似度为 {similarity*100:.0f}%，在 40% 上限以内，无需大幅修改。"
+            )
+    else:
+        similarity_warning = "（本次未计算相似度，跳过此项检查）"
 
     return f"""你是短视频脚本质量审核员。请根据以下要求，逐项审核并修正脚本。
 
@@ -407,6 +459,9 @@ def build_review_prompt(script_json: dict, script_type: str,
 ```
 
 {checklist}
+
+## 🔴 内容相似度检查
+{similarity_warning}
 
 ## 输出要求
 - 返回修正后的**完整 JSON**（格式与原始生成一致）

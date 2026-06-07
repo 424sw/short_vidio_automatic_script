@@ -24,9 +24,7 @@ data/*.jpg
 data/*.png
 data/*.json
 
-# Runtime lock/queue/marker files (concurrency control, never commit)
-data/.running
-data/.queue
+# Runtime marker files (never commit)
 data/.cleanup_done
 data/.expiry_queue
 
