@@ -4,3 +4,6 @@ toolbarMode = "viewer"
 
 [server]
 maxMessageSize = 500
+# 防止后台标签页 WebSocket 超时断开（步骤2 Whisper 转录可阻塞 90-180s）
+websocketConnectionTimeoutMs = 300000
+websocketCompressionLevel = 0
