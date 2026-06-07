@@ -4,6 +4,8 @@ import logging
 import subprocess
 from pathlib import Path
 
+import streamlit as st
+
 from openai import OpenAI
 
 from config import AGNES_BASE_URL, AGNES_API_KEY, AGNES_MODEL, FFMPEG_PATH, load_requirements, \
@@ -22,6 +24,24 @@ class VideoAnalysisError(Exception):
 
 def _make_client():
     return OpenAI(base_url=AGNES_BASE_URL, api_key=AGNES_API_KEY, timeout=120.0)
+
+
+@st.cache_resource
+def _load_whisper_model(compute_type: str):
+    """加载 Whisper 模型（进程级缓存，整个生命周期只加载一次）。
+
+    每个 compute_type（"int8" / "float32"）各缓存一个实例。
+    ModelScope 16GB 内存下避免重复加载导致 OOM。
+    """
+    model_path = str(_MODEL_DIR) if (
+        (_MODEL_DIR / "model.bin").exists() or (_MODEL_DIR / "config.json").exists()
+    ) else "small"
+    local_only = model_path != "small"
+
+    from faster_whisper import WhisperModel
+    logger.info("加载 Whisper 模型（compute=%s, local=%s）...", compute_type, local_only)
+    return WhisperModel(model_path, device="cpu", compute_type=compute_type,
+                        local_files_only=local_only)
 
 
 # ============================================================
@@ -100,22 +120,15 @@ def _transcribe_audio(audio_path: str, quality: str = "standard") -> str:
     if dur < 5:
         return ""
 
-    model_path = str(_MODEL_DIR) if (
-        (_MODEL_DIR / "model.bin").exists() or (_MODEL_DIR / "config.json").exists()
-    ) else "small"
-    local_only = model_path != "small"
-
     # 精细模式：float32 + 更大 beam size，识别更准但更慢
     use_fine = (quality == "fine")
     compute = "float32" if use_fine else "int8"
     beam = 10 if use_fine else 5
     quality_label = "精细" if use_fine else "标准"
-    logger.info(f"转录音频（{quality_label} · {'本地模型' if local_only else '在线下载'}，{dur:.0f} 秒，compute={compute} beam={beam}）...")
+    logger.info(f"转录音频（{quality_label}，{dur:.0f} 秒，compute={compute} beam={beam}）...")
     try:
-        from faster_whisper import WhisperModel
         from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeout
-        model = WhisperModel(model_path, device="cpu", compute_type=compute,
-                            local_files_only=local_only)
+        model = _load_whisper_model(compute)
         initial_prompt = _build_whisper_initial_prompt()
         logger.info(f"Whisper 领域上下文: {initial_prompt[:80]}...")
 
