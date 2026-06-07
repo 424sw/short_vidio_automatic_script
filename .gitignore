@@ -12,8 +12,8 @@ __pycache__/
 *.pyc
 *.pyo
 
-# Pre-downloaded ML models (run tools/setup_models.py to populate)
-tools/models/
+# Pre-downloaded ML models — 已跟随代码部署，无需服务器下载
+# tools/models/
 
 # Runtime data — all session subdirs + any files under data/
 # Session dirs like data/<session_id>/ contain frames, audio, downloads, etc.
