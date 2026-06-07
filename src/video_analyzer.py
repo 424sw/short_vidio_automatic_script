@@ -4,8 +4,6 @@ import logging
 import subprocess
 from pathlib import Path
 
-import streamlit as st
-
 from openai import OpenAI
 
 from config import AGNES_BASE_URL, AGNES_API_KEY, AGNES_MODEL, FFMPEG_PATH, load_requirements, \
@@ -26,13 +24,15 @@ def _make_client():
     return OpenAI(base_url=AGNES_BASE_URL, api_key=AGNES_API_KEY, timeout=120.0)
 
 
-@st.cache_resource
-def _load_whisper_model(compute_type: str):
-    """加载 Whisper 模型（进程级缓存，整个生命周期只加载一次）。
+# ==== Whisper 模型单例（模块级，避免重复加载导致 OOM） ====
+_whisper_models: dict = {}  # {"int8": model, "float32": model}
 
-    每个 compute_type（"int8" / "float32"）各缓存一个实例。
-    ModelScope 16GB 内存下避免重复加载导致 OOM。
-    """
+
+def _get_whisper_model(compute_type: str):
+    """获取 Whisper 模型实例（懒加载，每个 compute_type 只建一次）。"""
+    if compute_type in _whisper_models:
+        return _whisper_models[compute_type]
+
     model_path = str(_MODEL_DIR) if (
         (_MODEL_DIR / "model.bin").exists() or (_MODEL_DIR / "config.json").exists()
     ) else "small"
@@ -40,8 +40,10 @@ def _load_whisper_model(compute_type: str):
 
     from faster_whisper import WhisperModel
     logger.info("加载 Whisper 模型（compute=%s, local=%s）...", compute_type, local_only)
-    return WhisperModel(model_path, device="cpu", compute_type=compute_type,
-                        local_files_only=local_only)
+    model = WhisperModel(model_path, device="cpu", compute_type=compute_type,
+                         local_files_only=local_only)
+    _whisper_models[compute_type] = model
+    return model
 
 
 # ============================================================
@@ -128,7 +130,7 @@ def _transcribe_audio(audio_path: str, quality: str = "standard") -> str:
     logger.info(f"转录音频（{quality_label}，{dur:.0f} 秒，compute={compute} beam={beam}）...")
     try:
         from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeout
-        model = _load_whisper_model(compute)
+        model = _get_whisper_model(compute)
         initial_prompt = _build_whisper_initial_prompt()
         logger.info(f"Whisper 领域上下文: {initial_prompt[:80]}...")
 
