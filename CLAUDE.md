@@ -217,7 +217,8 @@ streamlit run app.py           # http://localhost:8501
 4. **刷新页面后文档链接丢失** — `step=6` 结果面板的文档链接存储在 `st.session_state` 中，浏览器刷新后新 session 没有历史数据 → 用户看到空白输入面板 → 以为文档已被删。
 5. **`_cleanup_stale_data()` 进程内只运行一次** — 标记文件 `data/.cleanup_done` 写入后永不删除。进程生命周期内只会清理一次残留 session 目录，后续异常退出的 session 残留文件不会自动回收。
 6. **`_fix_markers()` 仅 10 个预设标记** — 超过 10 轮对话时标记循环重复，且不读 `requirements.json` 的情绪选项列表，完全硬编码。
-7. ~~**多脚本输出质量不一致**~~ ✅ 已修复（2026-06-07）：`_validate()` 已新增口播脚本的【标记】、角色名、对话轮数硬检查；生成/审核 Prompt 已强化人机感要求；已新增相似度计算 + 超标降重机制。
+7. **GitHub Actions Lint 持续报错** — 本地 `ruff check` 已全部通过（2026-06-07 修复），但 GitHub Actions 的 `astral-sh/ruff-action@v3` 仍报失败。可能原因：远程 ruff 版本/配置与本地不一致。暂不影响功能，后续排查。
+8. ~~**多脚本输出质量不一致**~~ ✅ 已修复（2026-06-07）：`_validate()` 已新增口播脚本的【标记】、角色名、对话轮数硬检查；生成/审核 Prompt 已强化人机感要求；已新增相似度计算 + 超标降重机制。
 
 ### ⚠️ Streamlit 缓存教训
 
