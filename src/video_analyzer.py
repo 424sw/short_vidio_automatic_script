@@ -1,6 +1,6 @@
 """AI 视频分析：音频提取 + 语音转录 → AI 综合理解。"""
+import gc
 import re
-import sys
 import logging
 import subprocess
 from pathlib import Path
@@ -23,35 +23,6 @@ class VideoAnalysisError(Exception):
 
 def _make_client():
     return OpenAI(base_url=AGNES_BASE_URL, api_key=AGNES_API_KEY, timeout=120.0)
-
-
-# ==== Whisper 模型单例（存入 sys.modules，避免 importlib.reload() 清零） ====
-_MODEL_CACHE_KEY = "_whisper_model_cache"
-
-
-def _get_whisper_model(compute_type: str):
-    """获取 Whisper 模型实例（懒加载，每个 compute_type 只建一次）。
-
-    模型存在 sys.modules 而非模块级变量中，以免疫 app.py 的 importlib.reload() 清零。
-    """
-    cache = sys.modules.get(_MODEL_CACHE_KEY)
-    if cache is None:
-        cache = {}
-        sys.modules[_MODEL_CACHE_KEY] = cache
-    if compute_type in cache:
-        return cache[compute_type]
-
-    model_path = str(_MODEL_DIR) if (
-        (_MODEL_DIR / "model.bin").exists() or (_MODEL_DIR / "config.json").exists()
-    ) else "small"
-    local_only = model_path != "small"
-
-    from faster_whisper import WhisperModel
-    logger.info("加载 Whisper 模型（compute=%s, local=%s）...", compute_type, local_only)
-    model = WhisperModel(model_path, device="cpu", compute_type=compute_type,
-                         local_files_only=local_only)
-    cache[compute_type] = model
-    return model
 
 
 # ============================================================
@@ -137,26 +108,37 @@ def _transcribe_audio(audio_path: str, quality: str = "standard") -> str:
     quality_label = "精细" if use_fine else "标准"
     logger.info(f"转录音频（{quality_label}，{dur:.0f} 秒，compute={compute} beam={beam}）...")
     try:
+        from faster_whisper import WhisperModel
         from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeout
-        model = _get_whisper_model(compute)
+
+        model_path = str(_MODEL_DIR) if (
+            (_MODEL_DIR / "model.bin").exists() or (_MODEL_DIR / "config.json").exists()
+        ) else "small"
+        local_only = model_path != "small"
+        model = WhisperModel(model_path, device="cpu", compute_type=compute,
+                            local_files_only=local_only)
         initial_prompt = _build_whisper_initial_prompt()
         logger.info(f"Whisper 领域上下文: {initial_prompt[:80]}...")
 
-        # 在独立线程中执行转录，超时兜底
-        def _do_transcribe():
-            segments, info = model.transcribe(audio_path, language="zh",
-                                               beam_size=beam, vad_filter=True,
-                                               initial_prompt=initial_prompt)
-            text = "".join(s.text.strip() for s in segments)
-            return text, info
+        try:
+            # 在独立线程中执行转录，超时兜底
+            def _do_transcribe():
+                segments, info = model.transcribe(audio_path, language="zh",
+                                                   beam_size=beam, vad_filter=True,
+                                                   initial_prompt=initial_prompt)
+                text = "".join(s.text.strip() for s in segments)
+                return text, info
 
-        with ThreadPoolExecutor(max_workers=1) as executor:
-            future = executor.submit(_do_transcribe)
-            try:
-                text, info = future.result(timeout=WHISPER_TIMEOUT_SEC)
-            except FutureTimeout:
-                logger.warning(f"Whisper 转录超时（{WHISPER_TIMEOUT_SEC}秒），返回部分结果")
-                return f"音频时长: {dur:.1f}秒\n音频转录:\n（转录超时，音频时长 {dur:.0f} 秒）\n语言: zh\n⚠️ 转录超时"
+            with ThreadPoolExecutor(max_workers=1) as executor:
+                future = executor.submit(_do_transcribe)
+                try:
+                    text, info = future.result(timeout=WHISPER_TIMEOUT_SEC)
+                except FutureTimeout:
+                    logger.warning(f"Whisper 转录超时（{WHISPER_TIMEOUT_SEC}秒），返回部分结果")
+                    return f"音频时长: {dur:.1f}秒\n音频转录:\n（转录超时，音频时长 {dur:.0f} 秒）\n语言: zh\n⚠️ 转录超时"
+        finally:
+            del model
+            gc.collect()
 
         if text:
             return f"音频时长: {dur:.1f}秒\n音频转录:\n{text}\n语言: {info.language}\n⚠️ 若转录为繁体，请在下游 AI 步骤中要求转换为简体中文"
