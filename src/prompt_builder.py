@@ -420,6 +420,11 @@ def build_review_prompt(script_json: dict, synthesis: str = "",
 纯 JSON，无 markdown 包裹。"""
 
     # 有诊断 → 二次仿写
+    is_oral = "dialogs" in script_json
+    marker_rule = ""
+    if is_oral:
+        marker_rule = "- 🔴 **每轮对话末尾的【标记】一个都不许改**，只调整标记之前的对话正文内容\n"
+
     return f"""你是短视频脚本策划，之前输出的脚本在长度或相似度上不达标，需要做一次**二次仿写**。
 
 ## 参考视频分析
@@ -439,7 +444,8 @@ def build_review_prompt(script_json: dict, synthesis: str = "",
 ## 要求
 - 保持 JSON 结构（字段、类型）完全不变
 - 🔴 **original_text 一个字都不许改**，它是原视频文案的忠实还原，不是创作内容
-- 只调整 **dialogs（对话）** 的篇幅和措辞，降低与参考视频的相似度
+- 只调整 **dialogs（对话）** 的篇幅和措辞，降低与参考视频的相似度{marker_rule}
+- 对 dialogs 的修改仅限于：删减冗余句子、合并同类表达、更换措辞——严禁改动【标记】
 
 ## 输出
 纯 JSON，无 markdown 包裹。"""
