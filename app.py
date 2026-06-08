@@ -122,8 +122,10 @@ def _cleanup_session(sid: str = None):
 def _cleanup_stale_data():
     """每次请求清理 data/ 下超过 10 分钟的旧 session 目录。
 
-    旧设计用 .cleanup_done 标记只运行一次，导致后续异常退出（取消、断开、卡死）
-    的 session 视频/音频文件永久堆积，ModelScope 磁盘被耗尽。
+    通过检查 session 目录下的 .heartbeat 文件判断是否活跃：
+    - .heartbeat 在每次 rerun 时由 main() 刷新
+    - 若 .heartbeat 超过 10 分钟未更新 → session 已死
+    - 无 .heartbeat 的旧目录，以目录 mtime 作为备用判断
     """
     data_dir = Path("data")
     if not data_dir.exists():
@@ -135,14 +137,17 @@ def _cleanup_stale_data():
     for item in data_dir.iterdir():
         if not item.is_dir():
             continue
-        # 跳过非 session 目录
         if item.name.startswith("."):
             continue
-        # 跳过当前活跃 session
         if item.name == current_sid:
             continue
         try:
-            age = now - item.stat().st_mtime
+            hb = item / ".heartbeat"
+            if hb.exists():
+                age = now - hb.stat().st_mtime
+            else:
+                # 旧目录没有心跳文件，用目录 mtime 兜底
+                age = now - item.stat().st_mtime
             if age > stale_age:
                 shutil.rmtree(item, ignore_errors=True)
                 logger.info("清理残留 session: %s", item)
@@ -314,14 +319,18 @@ _EXPIRY_FILE = Path("data/.expiry_queue")  # JSONL: {"doc_id":..., "expires_at":
 
 
 def _enqueue_expiry(doc_ids: list):
-    """将文档 ID + 过期时间写入队列文件。"""
+    """将文档 ID + 过期时间写入队列文件（追加模式）。"""
     if not doc_ids:
         return
     _EXPIRY_FILE.parent.mkdir(parents=True, exist_ok=True)
     expiry = time.time() + DOC_TTL_SECONDS
-    with open(_EXPIRY_FILE, "a", encoding="utf-8") as f:
-        for did in doc_ids:
-            f.write(f'{{"doc_id":"{did}","expires_at":{expiry}}}\n')
+    new_lines = [f'{{"doc_id":"{did}","expires_at":{expiry}}}' for did in doc_ids]
+    # 读取已有条目 → 追加 → 原子写入，避免与 _cleanup_expired_docs 竞态
+    existing = _EXPIRY_FILE.read_text().strip() if _EXPIRY_FILE.exists() else ""
+    all_lines = ([existing] if existing else []) + new_lines
+    tmp = _EXPIRY_FILE.with_suffix(".tmp")
+    tmp.write_text("\n".join(all_lines), encoding="utf-8")
+    tmp.replace(_EXPIRY_FILE)
     logger.info("已写入过期队列: %d 个文档", len(doc_ids))
 
 
@@ -335,7 +344,6 @@ def _cleanup_expired_docs():
         return
 
     raw = _EXPIRY_FILE.read_text()
-    # 兼容损坏格式：{..}{..} → {..}\n{..}
     raw = raw.replace("}{", "}\n{")
     lines = raw.splitlines()
     remaining = []
@@ -354,22 +362,20 @@ def _cleanup_expired_docs():
                         logger.info("过期文档已删除: %s", entry["doc_id"])
                         deleted += 1
                     else:
-                        logger.warning("过期文档 %s 删除API返回失败", entry["doc_id"])
-                        remaining.append(line)
-                        continue
+                        logger.warning("过期文档 %s 删除API返回失败，丢弃", entry["doc_id"])
                 except Exception as e:
-                    logger.warning("删除过期文档 %s 异常: %s", entry["doc_id"], e)
-                    remaining.append(line)
-                    continue
+                    logger.warning("删除过期文档 %s 异常，丢弃: %s", entry["doc_id"], e)
             else:
                 remaining.append(line)
         except Exception:
-            remaining.append(line)
+            pass
 
     if deleted:
         logger.info("本次清理过期文档: %d 个", deleted)
     if remaining:
-        _EXPIRY_FILE.write_text("\n".join(remaining))
+        tmp = _EXPIRY_FILE.with_suffix(".tmp")
+        tmp.write_text("\n".join(remaining), encoding="utf-8")
+        tmp.replace(_EXPIRY_FILE)
     else:
         _EXPIRY_FILE.unlink(missing_ok=True)
 
@@ -532,7 +538,7 @@ def step2_analyze():
         )
         _check_cancel()
         audio_text = result.get("audio_transcript", "")
-        audio_note = "（含语音转文字）" if audio_text and "转录" in audio_text else ""
+        audio_note = "（语音转文字）" if audio_text and "转录" in audio_text else ""
         st.session_state.synthesis = result["synthesis"]
         st.session_state.audio_transcript = audio_text
 
