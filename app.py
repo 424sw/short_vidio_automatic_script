@@ -29,7 +29,6 @@ from src.douyin_extractor import DouyinExtractor, DouyinError  # noqa: E402
 from src.video_analyzer import VideoAnalyzer, VideoAnalysisError  # noqa: E402
 from src.script_generator import ScriptGenerator, ScriptGeneratorError  # noqa: E402
 from src.feishu_ops import FeishuClient, FeishuError  # noqa: E402
-from src.prompt_builder import build_mix_prompt, build_oral_prompt  # noqa: E402
 from config import MAX_SCRIPT_COUNT, DOC_TTL_SECONDS  # noqa: E402
 
 
@@ -87,7 +86,7 @@ DEFAULTS = {
     "doc_created_at": 0.0,  # 文档创建时间戳，用于 TTL 倒计时
     "error": None,
     "status_msg": "",
-    "script_type_selection": "auto",
+    "script_type_selection": "mix",
     "script_type": "mix",
     "quality": "standard",
     "script_count": 1,
@@ -214,8 +213,8 @@ def render_input_panel():
     with col_type:
         script_type_selection = st.selectbox(
             "脚本类型",
-            options=["auto", "mix", "oral"],
-            format_func=lambda x: {"auto": "自动检测", "mix": "混剪", "oral": "口播"}[x],
+            options=["mix", "oral"],
+            format_func=lambda x: {"mix": "混剪", "oral": "口播"}[x],
             index=0,
             key="script_type_selector",
         )
@@ -257,8 +256,9 @@ def render_input_panel():
 # 结果面板
 # ============================================================
 def render_result_panel():
-    # 进入结果面板立即清理过期文档
+    # 进入结果面板立即清理过期文档 + 本地临时文件（视频已上传飞书，无需保留）
     _cleanup_expired_docs()
+    _cleanup_session()
 
     st.success("全部完成")
 
@@ -319,7 +319,7 @@ def _enqueue_expiry(doc_ids: list):
         return
     _EXPIRY_FILE.parent.mkdir(parents=True, exist_ok=True)
     expiry = time.time() + DOC_TTL_SECONDS
-    with open(_EXPIRY_FILE, "a") as f:
+    with open(_EXPIRY_FILE, "a", encoding="utf-8") as f:
         for did in doc_ids:
             f.write(f'{{"doc_id":"{did}","expires_at":{expiry}}}\n')
     logger.info("已写入过期队列: %d 个文档", len(doc_ids))
@@ -334,7 +334,10 @@ def _cleanup_expired_docs():
     except Exception:
         return
 
-    lines = _EXPIRY_FILE.read_text().splitlines()
+    raw = _EXPIRY_FILE.read_text()
+    # 兼容损坏格式：{..}{..} → {..}\n{..}
+    raw = raw.replace("}{", "}\n{")
+    lines = raw.splitlines()
     remaining = []
     deleted = 0
     now = time.time()
@@ -533,15 +536,8 @@ def step2_analyze():
         st.session_state.synthesis = result["synthesis"]
         st.session_state.audio_transcript = audio_text
 
-        # 自动检测脚本类型（或使用用户手动选择）
-        selection = st.session_state.get("script_type_selection", "auto")
-        if selection == "auto":
-            gen = ScriptGenerator()
-            detected = gen.detect_type(result["synthesis"], st.session_state.video_title, audio_text)
-            st.session_state.script_type = detected
-            logger.info("自动检测脚本类型: %s", detected)
-        else:
-            st.session_state.script_type = selection
+        # 用户手动选择脚本类型
+        st.session_state.script_type = st.session_state.get("script_type_selection", "mix")
 
         st.session_state.step = 3
         st.session_state.status_msg = f"分析完成 {audio_note}"
@@ -645,7 +641,7 @@ def step3_generate():
 
 
 def step4_review():
-    """AI 审核微调：对照原始 Prompt 逐项校验，修正格式偏差和内容缺失。"""
+    """AI 二次仿写审核：聚焦长度偏差和相似度，缩写/扩写/降重改写。"""
     script = st.session_state.script_json
     script_type = st.session_state.script_type
     total = len(st.session_state.get("script_jsons", [script]))
@@ -655,20 +651,10 @@ def step4_review():
         _touch_heartbeat()
         _check_cancel()
         gen = ScriptGenerator()
-        audio_transcript = st.session_state.get("audio_transcript", "")
-        if script_type == "oral":
-            original_prompt = build_oral_prompt(
-                st.session_state.synthesis, audio_transcript=audio_transcript,
-                target_chars=st.session_state.get("target_chars", 0))
-        else:
-            original_prompt = build_mix_prompt(
-                st.session_state.synthesis, audio_transcript=audio_transcript,
-                target_chars=st.session_state.get("target_chars", 0))
 
         refined, note = gen.review(
-            script, script_type, original_prompt,
+            script, script_type,
             synthesis=st.session_state.get("synthesis", ""),
-            audio_transcript=st.session_state.get("audio_transcript", ""),
             target_chars=st.session_state.get("target_chars", 0))
         st.session_state.script_json = refined
         # 更新 script_jsons 中的主脚本

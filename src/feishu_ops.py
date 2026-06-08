@@ -109,12 +109,15 @@ class FeishuClient:
                 time.sleep(wait)
                 continue
             # 95201: 文档元数据还在初始化（刚复制完模板，飞书后台没准备好）
-            if code == 95201 and attempt < RETRY_MAX - 1:
-                wait = RETRY_BACKOFF * (2 ** attempt) + 1.0  # 额外+1s，给后台更多时间
-                logger.warning("飞书文档元数据未就绪(95201)，等待 %.1fs 后重试 (%d/%d)...",
-                              wait, attempt + 1, RETRY_MAX)
-                time.sleep(wait)
-                continue
+            # 等待时间递增：1.5s → 3s → 7s，给飞书后台充足时间完成异步初始化
+            if code == 95201:
+                waits = [1.5, 3.0, 7.0]
+                if attempt < len(waits):
+                    wait = waits[attempt]
+                    logger.warning("飞书文档元数据未就绪(95201)，等待 %.1fs 后重试 (%d/%d)...",
+                                  wait, attempt + 1, RETRY_MAX)
+                    time.sleep(wait)
+                    continue
             # 详细错误日志
             logger.error(f"飞书 API 调用失败: {method} {url}")
             logger.error(f"请求体: {json.dumps(kwargs.get('json', kwargs.get('data', {})), ensure_ascii=False)[:500]}")
@@ -404,7 +407,6 @@ class FeishuClient:
         # 跳过表头行 (row 0), 从 row 1 开始填数据
         for i, row in enumerate(rows_data):
             content_text = str(row[0]) if row else ""
-            material_text = str(row[1]) if len(row) >= 2 else ""
             row = i + 1  # 数据行从第1行开始（第0行是表头）
             col0_idx = row * C + 0
             col1_idx = row * C + 1
@@ -416,12 +418,8 @@ class FeishuClient:
                     self.update_text_block(doc_id, child0, content_text,
                                           multiline=True)
 
-            if col1_idx < len(cells):
-                cell1 = cells[col1_idx]
-                child1 = cell1.get("children", [""])[0] if cell1 else None
-                if child1:
-                    self.update_text_block(doc_id, child1, material_text,
-                                          multiline=True)
+            # 素材列：暂不开发图片插入，不执行写入操作
+            pass
 
             time.sleep(0.15)
 
@@ -529,14 +527,8 @@ class FeishuClient:
             )
             logger.info("口播对话已填充（含黄色高亮）")
 
-        # Col 2: 图片素材 (cell at row=1, col=2)
-        cell2 = cells[5]
-        child2 = cell2.get("children", [""])[0] if cell2 else None
-        if child2:
-            images_text = "\n".join(
-                f"{i+1}. {img}" for i, img in enumerate(images)
-            )
-            self.update_text_block(doc_id, child2, images_text, multiline=True)
+        # Col 2: 图片素材 — 暂不开发，不执行写入操作
+        pass
 
         logger.info("口播表格填充完成")
 

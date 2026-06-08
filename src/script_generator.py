@@ -40,19 +40,10 @@ class ScriptGenerator:
         src = f"（来源: {video_title}）" if video_title else ""
         logger.info("生成%s脚本%s...", type_label, src)
 
-        # 一次 AI 调用
-        raw = self._call_api(prompt, target_chars=target_chars)
-
-        # 尝试解析 JSON，最多一次轻量修复（只修格式，不重生成内容）
-        try:
-            script = self._parse_json(raw)
-        except ScriptGeneratorError:
-            logger.warning("JSON 解析失败，尝试一次轻量修复...")
-            raw2 = self._call_api(
-                "你上次输出的内容 JSON 格式有误，无法解析。"
-                "请严格按格式重新输出纯 JSON，不要用 markdown 代码块包裹，"
-                "确保所有字符串用双引号，没有尾随逗号。")
-            script = self._parse_json(raw2)
+        # 一次 AI 调用，直接解析 JSON（不重试，失败就报错）
+        raw = self._call_api(prompt, target_chars=target_chars,
+                            script_type=script_type)
+        script = self._parse_json(raw)
 
         logger.info("%s脚本生成成功（由审核步骤负责质量检查）", type_label)
         return script
@@ -75,18 +66,22 @@ class ScriptGenerator:
                 time.sleep(1.5)
         return scripts
 
-    def _call_api(self, prompt: str, target_chars: int = 0) -> str:
-        """调用 AI API，返回原始文本，带限流重试。max_tokens 根据目标字数动态限制。
+    def _call_api(self, prompt: str, target_chars: int = 0,
+                  script_type: str = "mix") -> str:
+        """调用 AI API，返回原始文本，带限流重试。max_tokens 按脚本类型动态限制。
 
-        max_tokens 公式：中文字符 ≈ 1.2-1.5 token/字，JSON结构≈300 token，留余量×1.3。
-        150字参考→535，200字→650，300字→885，500字→1275。
+        混剪输出 ≈ 参考视频字数。口播输出含 original_text + dialogs，API 预算约 3x，但内容长度仅对比 dialogs。
         """
         if target_chars > 0:
-            base = int(target_chars * 1.5) + 300
+            if script_type == "oral":
+                base = int(target_chars * 3.0) + 500
+            else:
+                base = int(target_chars * 1.5) + 300
             max_tok = max(400, int(base * 1.3))
         else:
-            max_tok = 1500
-        logger.info("API 调用 max_tokens=%d (target_chars=%d)", max_tok, target_chars)
+            max_tok = 2800 if script_type == "oral" else 1500
+        logger.info("API 调用 max_tokens=%d (target_chars=%d, type=%s)",
+                    max_tok, target_chars, script_type)
 
         max_retries = 3
         for attempt in range(max_retries):
@@ -137,109 +132,119 @@ class ScriptGenerator:
                 return self._parse_json(raw2)
             raise ScriptGeneratorError(f"JSON 解析失败: {e}\n原始输出: {raw[:300]}")
 
-    def detect_type(self, synthesis: str, video_title: str, audio_transcript: str = "") -> str:
-        """根据视频内容自动检测脚本类型.
+    def detect_type(self, audio_transcript: str = "") -> str:
+        """根据音频转录检测脚本类型。
 
-        图文类/知识分享类 → 混剪
-        剧情类/对话类/真人出镜 → 口播
+        只看音频转录文字本身：是否有明显的多角色对话模式（换人说话、问答等）。
         失败时默认返回 "mix"。
         """
-        # 从音频转录中提取前800字作为补充材料，帮助判断是否有对话结构
-        transcript_excerpt = audio_transcript[:800] if audio_transcript else "（无音频转录）"
-        prompt = f"""分析以下视频内容，判断它更适合制作"混剪脚本"还是"口播脚本"。
+        if not audio_transcript:
+            return "mix"
 
-视频标题: {video_title}
+        transcript_excerpt = audio_transcript[:1200]
+        prompt = f"""判断以下音频转录文字中，是单个人在讲还是两个多个人在对话。
 
-视频综合分析:
-{synthesis[:2000]}
-
-音频转录节选:
+音频转录：
 {transcript_excerpt}
 
-判断标准:
-- 混剪: 适合图文+配音形式，如知识分享、观点输出、干货盘点、情感文案等
-- 口播: 适合真人出镜+对话/独白形式，如剧情、角色对话、采访、Vlog等
+- 如果从头到尾一个人讲 → 回复 mix
+- 如果能听出两个或多个人在交替对话 → 回复 oral
 
-只回复一个词: "mix" 或 "oral"."""
+只回复一个词: mix 或 oral。"""
 
         try:
             response = self._client.chat.completions.create(
                 model=AGNES_MODEL,
                 messages=[{"role": "user", "content": prompt}],
                 max_tokens=10,
-                temperature=0.3,
+                temperature=0.1,
                 timeout=30,
             )
             answer = response.choices[0].message.content.strip().lower()
-            if "oral" in answer or "口播" in answer:
+            if "oral" in answer:
                 return "oral"
             return "mix"
         except Exception as e:
             logger.warning(f"脚本类型检测失败，默认使用混剪: {e}")
             return "mix"
 
-    def review(self, script: dict, script_type: str, original_prompt: str,
-               synthesis: str = "", audio_transcript: str = "", target_chars: int = 0) -> tuple:
-        """AI 自检审核：对照原始 Prompt 逐项校验，修正格式偏差和内容缺失。
+    def review(self, script: dict, script_type: str,
+               synthesis: str = "", target_chars: int = 0) -> tuple:
+        """AI 二次仿写审核：诊断长度偏差和相似度，聚焦缩写/扩写/降重改写。
 
-        新增：计算脚本与参考视频的内容相似度，超过 40% 时要求 AI 降重改写。
-        最多重试 3 次，3 次都不行就用最后一版（不再回退原版）。
+        重试最多 1 次，失败回退原版。
 
         Args:
             script: 已生成的脚本 JSON
             script_type: "mix" 或 "oral"
-            original_prompt: 原始生成 Prompt
-            synthesis: 视频综合分析文本（用于相似度计算）
-            audio_transcript: 音频转录文本（用于相似度计算）
-            target_chars: 目标字数（用于长度校验）
+            synthesis: 视频综合分析文本
+            target_chars: 参考视频口播字数
 
         Returns:
             (script, note): 修正后的脚本 + 审核结果描述
         """
-        # 计算相似度
-        similarity = self._compute_similarity(script, script_type, synthesis, audio_transcript)
-        ref_word_count = target_chars if target_chars > 0 else 0
-        logger.info("相似度: %.1f%%, 参考字数: %d", similarity * 100, ref_word_count)
+        # 计算脚本内容字数和相似度
+        script_chars = self._count_script_chars(script, script_type)
+        similarity = self._compute_similarity(script, script_type, synthesis)
+        logger.info("审核诊断: script_chars=%d, target_chars=%d, similarity=%.1f%%",
+                    script_chars, target_chars, similarity * 100)
 
-        prompt = build_review_prompt(script, script_type, original_prompt,
-                                     similarity=similarity, ref_word_count=ref_word_count)
+        prompt = build_review_prompt(script,
+                                     synthesis=synthesis,
+                                     target_chars=target_chars,
+                                     similarity=similarity,
+                                     script_chars=script_chars)
         type_label = "口播" if script_type == "oral" else "混剪"
         logger.info("审核微调%s脚本...", type_label)
 
-        last_script = script
-        max_retries = 2
-        for attempt in range(max_retries + 1):
+        # 最多 2 次尝试：首次 + 1 次重试
+        for attempt in range(2):
             try:
-                raw = self._call_api(prompt)
+                raw = self._call_api(prompt, script_type=script_type)
                 refined = self._parse_json(raw, retry_prompt=prompt)
-                last_script = refined  # 解析成功，记录为最新可用版本
                 self._validate(refined, script_type)
-                note = "审核通过" if attempt == 0 else f"审核通过（第 {attempt+1} 次）"
-                logger.info("审核微调完成（第 %d 次）", attempt + 1)
+
+                # 二次审核后的相似度复查
+                new_chars = self._count_script_chars(refined, script_type)
+                new_sim = self._compute_similarity(refined, script_type, synthesis)
+                logger.info("审核后: chars=%d, similarity=%.1f%%", new_chars, new_sim * 100)
+
+                note = "审核通过" if attempt == 0 else "审核通过（第 2 次）"
+                logger.info("审核完成（第 %d 次）", attempt + 1)
                 return refined, note
             except (ScriptGeneratorError, json.JSONDecodeError) as e:
-                if attempt < max_retries:
-                    logger.warning("审核校验失败（第 %d/%d 次）: %s，重试中...", attempt + 1, max_retries + 1, e)
-                    prompt = (
-                        f"⚠️ 上一次修正被拒绝，原因：{e}\n"
-                        f"请修正上述问题，重新输出完整的纯 JSON。\n\n"
-                        + prompt
-                    )
+                if attempt == 0:
+                    logger.warning("审核失败（第 1 次）: %s，重试...", e)
+                    # 重试用同一个 prompt，不堆积错误信息
+                    prompt = f"上次输出被拒绝：{e}\n请严格按格式输出完整纯 JSON。\n\n" + prompt
+                else:
+                    logger.warning("审核 2 次均失败，回退原版: %s", e)
 
-        # 所有重试耗尽：用最后一版，尝试程序化补标记
-        logger.warning("审核微调 %d 次均未完全通过校验，使用最后一版", max_retries + 1)
-
-        # 兜底：不依赖 AI，程序化修复缺失的【标记】
+        # 耗尽重试：回退原版 + 程序化补标记
+        logger.warning("审核回退使用原始脚本")
         if script_type == "oral":
-            last_script = self._fix_markers(last_script)
-            try:
-                self._validate(last_script, script_type)
-                logger.info("程序化修复后校验通过")
-                return last_script, "审核通过（自动修复）"
-            except ScriptGeneratorError as e:
-                logger.warning("程序化修复后仍不通过: %s", e)
+            script = self._fix_markers(dict(script))  # 副本上修复
+        return script, "审核未通过，使用原始脚本（请人工复核）"
 
-        return last_script, "审核未完全通过，使用最后一版（请人工复核）"
+    def _count_script_chars(self, script: dict, script_type: str) -> int:
+        """统计「正式创作内容」的中文字数。口播只统计 dialogs，original_text 是原文还原，长度约束不包含它。"""
+        import re as _re
+        parts = []
+        if script_type == "oral":
+            for d in script.get("dialogs", []):
+                if isinstance(d, list) and len(d) >= 2:
+                    parts.append(str(d[1]))
+            for i in script.get("images", []):
+                parts.append(str(i))
+        else:
+            for r in script.get("rows", []):
+                if isinstance(r, list) and len(r) >= 1:
+                    parts.append(str(r[0]))
+                if isinstance(r, list) and len(r) >= 2:
+                    parts.append(str(r[1]))
+        # 统计中文字符
+        text = " ".join(parts)
+        return len(_re.findall(r'[一-鿿]', text))
 
     def _find_missing_markers(self, script: dict) -> list:
         """扫描口播脚本，返回所有缺少末尾【标记】的对话轮号列表。"""
@@ -272,26 +277,20 @@ class ScriptGenerator:
         return script
 
     def _compute_similarity(self, script: dict, script_type: str,
-                            synthesis: str = "", audio_transcript: str = "") -> float:
+                            synthesis: str = "") -> float:
         """计算生成脚本与参考视频内容之间的字符三元组 Jaccard 相似度。
 
         返回值范围 0-1。返回 0 表示无法计算（参考文本为空）。
         阈值：超过 0.4（40%）视为相似度过高，需要降重。
         """
-        # 提取参考文本
-        ref_parts = []
-        if audio_transcript:
-            ref_parts.append(audio_transcript)
-        if synthesis:
-            ref_parts.append(synthesis)
-        ref_text = " ".join(ref_parts)
+        # 参考文本只用 synthesis（视频分析），不用 audio_transcript（原文转录）
+        ref_text = (synthesis or "")
         if not ref_text.strip():
             return 0.0
 
-        # 提取脚本中所有文本内容
+        # 提取「创作内容」文本，口播不比较 original_text（它是原文还原，天然高度相似）
         script_parts = []
         if script_type == "oral":
-            script_parts.append(script.get("original_text", ""))
             for d in script.get("dialogs", []):
                 if isinstance(d, list) and len(d) >= 2:
                     script_parts.append(str(d[1]))
@@ -368,7 +367,7 @@ class ScriptGenerator:
                 if str(role).strip() not in ("A", "B"):
                     raise ScriptGeneratorError(
                         f"第{i}轮角色名错误: '{role}'（只能是 'A' 或 'B'）")
-                # 对话内容末尾必须有【标记】（2-4字）
+                # 对话内容末尾必须有【标记】
                 text_str = str(text).strip() if text else ""
                 if not text_str:
                     raise ScriptGeneratorError(f"第{i}轮对话内容为空")
@@ -378,12 +377,6 @@ class ScriptGenerator:
                     raise ScriptGeneratorError(
                         f"第{i}轮对话缺少末尾【情绪/动作标记】，"
                         f"请在对话末尾添加如【恍然大悟】【好奇追问】等标记")
-                # 标记长度检查
-                marker_text = marker_match.group().strip()
-                inner = re.sub(r'[【】]', '', marker_text)
-                if len(inner) < 1:
-                    raise ScriptGeneratorError(
-                        f"第{i}轮对话末尾标记为空，请填写2-4字的情绪/动作描述")
 
             if "images" not in script or not isinstance(script.get("images"), list):
                 raise ScriptGeneratorError("缺少 images 数组")

@@ -149,7 +149,7 @@ def build_mix_prompt(synthesis: str,
     # ==== 内容长度约束（硬性） ====
     length_constraint = ""
     if target_chars > 0:
-        lo_chars = int(target_chars * 0.8)
+        lo_chars = int(target_chars * 1.1)
         hi_chars = int(target_chars * 1.2)
         length_constraint = (
             f"\n## 🔴 内容长度硬性约束\n"
@@ -188,23 +188,23 @@ def build_mix_prompt(synthesis: str,
 
 ## 输出格式（纯 JSON，不用 markdown 代码块包裹）
 
-格式说明：rows 中每条文案是一段完整的口播内容（不是一句话），用 \\\\n 在适当位置换行来分隔意群、代替标点，表示语气停顿。
+格式说明：rows 中每条文案是一段完整的口播内容，用 \\\\n 分隔意群表示语气停顿。**每行 1-3 句**均可，严禁超过 3 句。
 
-正确示例（注意文案内容中的 \\\\n 换行）：
+正确示例（注意行间句数不一，有的 2 句有的 3 句，不要每行都凑 3 句）：
 {{{{
   "title": "零基础转行面试三大秘诀 #转行求职 #面试技巧 #零基础",
   "hashtags": ["转行求职", "面试技巧", "零基础", "职场干货"],
   "rows": [
     ["你是不是也像我一样\\n投了几十份简历\\n一个面试都没有", "功德猫.jpg 穿僧袍戴佛珠的猫咪祈福表情包"],
-    ["朋友推荐我上鱼泡直聘\\n上面岗位都是真实直招\\n而且还有新人培训\\n零基础也能快速上手", "小狗点头.jpg 小狗戴着眼镜在键盘前点头的表情包"]
+    ["朋友推荐我上鱼泡直聘\\n上面都是真实直招岗位\\n零基础也能快速上手", "小狗点头.jpg 小狗戴着眼镜在键盘前点头的表情包"]
   ]
 }}}}
 
 ## 脚本要求
-- 共 {lo}-{hi} 行，每行 = 一段完整口播文案（多句话，用换行分隔）+ 一张配图素材
+- 共 {lo}-{hi} 行，每行 = 一段完整口播文案（1-3句，用换行分隔）+ 一张配图素材
 - 🔴 **内容长度与参考视频相当**：仿写内容的总篇幅（字数、行数、信息量）应与上方视频分析中的原视频文案长度一致，不要大幅超出或缩水
 - 风格：**单人讲解**，口语化，仿佛对着镜头跟观众聊天
-- 每行文案必须是**一段完整的口语内容**（2-5句话），用自然换行（\\\\n）分隔来表示语言停顿，严禁任何标点符号
+- 🔴 **断句控制（硬性）**：每行文案 **1-3 句**，用 \\\\n 分隔。严禁 4 句及以上。**不要每行都凑到 3 句**——有的一两句能说清就用一两句，需要展开的才用 3 句。过多断句=画面切换过于频繁。
 - 🔴 **人机感（硬性）**：像真人说话，不要写成文章。大量用口语词（呢、吧、啊、嘛），多用反问和感叹，句式长短错落（短句2-4字+长句15-25字交替），严禁「此外/因此/综上所述/值得注意的是」等公文套话
 - 🔴 **措辞差异化**：核心观点可一致，但具体措辞、举例、比喻必须与参考视频不同，不得大段照搬原文
 - 素材格式：{m.get('素材格式', '文件名.jpg 中文描述')}
@@ -249,7 +249,7 @@ def build_oral_prompt(synthesis: str, audio_transcript: str = "",
     # ==== 内容长度约束（硬性） ====
     length_constraint = ""
     if target_chars > 0:
-        lo_chars = int(target_chars * 0.8)
+        lo_chars = int(target_chars * 1.1)
         hi_chars = int(target_chars * 1.2)
         length_constraint = (
             f"\n## 🔴 内容长度硬性约束\n"
@@ -333,7 +333,7 @@ def build_oral_prompt(synthesis: str, audio_transcript: str = "",
 - 🔴 角色名**只能是 "A" 和 "B"**（纯字母），**绝对不能**写成 "角色A"、"角色B"、"**A**" 等任何变体
 - 🔴 **每轮对话必须是 3-5 句话的完整大段表达**，包含观点、铺垫、回应、递进，**严禁**单句对话（单句是不合格的输出）
 - 🔴 **对话内容必须覆盖原文所有关键信息点**，但用**不同的措辞和表述方式**，不要照搬 original_text 的句子结构
-- 🔴🔴 **每轮对话末尾必须有【标记】**：用【】包裹 2-4 字的情绪/动作/描述词（如【恍然大悟】【好奇追问】【无奈摇头】【真诚推荐】），**没有标记的对话会被验证步骤直接拒绝**
+- 🔴🔴 **每轮对话末尾必须有【标记】**：用【】包裹 4 字的情绪/动作/描述词（如【恍然大悟】【好奇追问】【无奈摇头】【真诚推荐】），**没有标记的对话会被验证步骤直接拒绝**
 - 可选标记可参考：{emotions}
 - **对话内容用标点符号正常断句**（口播是对白，需标点表达语气停顿）
 - 对话要口语化、有互动感，A/B角色交替出现
@@ -371,100 +371,75 @@ def build_oral_prompt(synthesis: str, audio_transcript: str = "",
 {products}"""
 
 
-def build_review_prompt(script_json: dict, script_type: str,
-                        original_prompt: str, similarity: float = 0.0,
-                        ref_word_count: int = 0) -> str:
-    """构建 AI 审核微调的 Prompt。
+def build_review_prompt(script_json: dict, synthesis: str = "",
+                        target_chars: int = 0, similarity: float = 0.0,
+                        script_chars: int = 0) -> str:
+    """审核微调 Prompt：**只关注两项** —— ①内容长度匹配 ②内容相似度匹配。
 
-    将已生成的脚本 JSON 连同原始生成 Prompt 回传给 AI，
-    要求逐项对照校验，自动修正格式偏差和内容缺失。
-
-    Args:
-        script_json: 已生成的脚本 JSON
-        script_type: "mix" 或 "oral"
-        original_prompt: 原始生成 Prompt
-        similarity: 脚本与参考视频的相似度（0-1），0 表示未计算
-        ref_word_count: 参考视频的口播字数，0 表示未计算
+    格式问题（标记/角色名/话题词/对话轮数等）由 _validate() + _fix_markers() 兜底，
+    不在此处理。
     """
-    req = load_requirements()
     script_text = json.dumps(script_json, ensure_ascii=False, indent=2)
 
-    if script_type == "oral":
-        o = req.get("口播", {})
-        dia_range = o.get("对话轮数范围", [8, 20])
-        dia_lo, dia_hi = dia_range[0], dia_range[1]
-        suggested = max(dia_lo, min(dia_hi, ref_word_count // 15)) if ref_word_count > 0 else (dia_lo + dia_hi) // 2
-        mid = suggested // 2
-        checklist = f"""## 🔴 逐项审核清单（口播脚本）
+    # ---- 诊断：仅长度 + 相似度 ----
+    diagnoses = []
+    instructions = []
 
-1. **标题**：15-25字，纯标题文本，不包含 #话题词
-2. **hashtags**：正好 4-5 个中文短语，**严禁包含品牌名**（如鱼泡直聘）
-3. **original_text**：完整、通顺、逻辑连贯的文案，无 ASR 识别错误（如「主包→主播」）
-4. **dialogs**：
-   - 在 {dia_lo}-{dia_hi} 轮之间（{suggested} 轮左右）
-   - 角色名只能写 "A" 和 "B"（纯字母），不是「角色A」「**A**」
-   - 每轮 3-5 句完整大段对话，严禁单句敷衍
-   - 每轮末尾有【2-4字标记】（如【热心推荐】【恍然大悟】），没有标记的对话必须补上
-   - 对话覆盖 original_text 所有关键信息点
-   - 使用标点符号正常断句
-5. **images**：只需 2-3 条，官方/品牌风格（APP图标、截图、数据图表），**严禁**表情包/动物/卡通
-6. **广告植入**：
-   - 品牌「鱼泡直聘」必须在前50%轮次（1~{mid}轮）首次出现
-   - 必须是第一个被谈及的商业品牌
-   - 品牌名后紧跟一段产品介绍库中的匹配文案（20-40字）
-   - 广告内容的情绪标记为【推荐】
-7. **内容长度**：dialogs 总字数与参考视频口播字数在同一量级（80%-120%），不得大幅超出或缩水。**original_text 不限字数**，完整还原即可
-8. 🔴 **人机感**：对话像真人聊天，有口语词（呢、吧、啊、嘛）、有互动感、句式长短错落，严禁「此外/因此/综上所述」等书面语套话"""
-    else:
-        m = req.get("混剪", {})
-        lo, hi = m.get("行数范围", [10, 16])
-        checklist = f"""## 🔴 逐项审核清单（混剪脚本）
+    if target_chars > 0 and script_chars > 0:
+        ratio = script_chars / target_chars
+        lo_chars = int(target_chars * 1.1)
+        hi_chars = int(target_chars * 1.2)
+        if ratio > 1.2:
+            diagnoses.append(f"过长：{script_chars}字 vs 参考{target_chars}字（+{int((ratio-1)*100)}%）")
+            instructions.append(
+                f"**缩写+仿写**：压缩到 {lo_chars}~{hi_chars} 字。删冗余、并同类、换措辞降相似度。")
+        elif ratio < 1.1:
+            diagnoses.append(f"过短：{script_chars}字 vs 参考{target_chars}字（{int(ratio*100)}%）")
+            instructions.append(
+                f"**扩写+仿写**：扩充到 {lo_chars}~{hi_chars} 字。补细节、丰互动、换措辞降相似度。")
 
-1. **标题**：15-25字，**必须包含 #话题词**（如「零基础转行面试三大秘诀 #职场干货 #面试技巧」）
-2. **hashtags**：正好 4-5 个中文短语，**严禁包含品牌名**（如鱼泡直聘）
-3. **rows**：在 [{lo}, {hi}] 行范围内
-4. **每行** = [口播文案, 素材描述]，文案用 \n 换行替代标点，**严禁任何标点符号**
-5. **素材**：动物/表情包等趣味风格，与文案内容匹配
-6. **广告植入**：
-   - 品牌「鱼泡直聘」必须在前50%行（1~{hi // 2}行）首次出现
-   - 必须是第一个被谈及的商业品牌
-   - 品牌名后紧跟一段产品介绍库中的匹配文案（20-40字）
-7. **内容篇幅**：rows 中所有文案字数总和，与参考视频口播字数在同一量级，不得超过参考视频字数的 120%
-8. 🔴 **人机感**：文案像真人说话，有口语词（呢、吧、啊、嘛）、有情绪起伏、句式长短错落，严禁「此外/因此/综上所述」等书面语套话"""
+    if similarity > 0.4:
+        diagnoses.append(f"相似度过高：{similarity*100:.0f}%（上限40%）")
+        instructions.append(
+            "**降重仿写（硬性）**：以下 3 条必须全部做到——\n"
+            "① 换句式：把陈述句改成反问/感叹/假设句（\"你知道吗？\"\"要是...呢？\"\"想想看！\"）\n"
+            "② 换案例：把原文的具体数据、故事、举例全部换成你自己创造的同类素材\n"
+            "③ 换措辞：同一个意思用完全不同的词来表达（如\"找工作\"→\"谋职\"→\"上岸\"→\"拿offer\"轮换）\n"
+            "目标：改完后相似度 < 40%，不能只是换几个同义词敷衍。")
 
-    # 构建相似度警告
-    if similarity > 0:
-        if similarity > 0.4:
-            similarity_warning = (
-                f"⚠️ 当前脚本与参考视频的内容相似度为 {similarity*100:.0f}%，超过 40% 上限。\n"
-                f"请大幅改写脚本：更换比喻、举例、句式结构，用不同的表达方式传达相同的核心观点。\n"
-                f"具体做法：换掉原文中的具体数据和案例，用你自己创造的同类素材替代；\n"
-                f"改写至少 60% 的句子，改变句式结构（如把陈述句改成反问句，把长句拆成短句等）。"
-            )
-        else:
-            similarity_warning = (
-                f"当前脚本与参考视频的内容相似度为 {similarity*100:.0f}%，在 40% 上限以内，无需大幅修改。"
-            )
-    else:
-        similarity_warning = "（本次未计算相似度，跳过此项检查）"
+    diagnosis_text = "\n".join(f"- {d}" for d in diagnoses) if diagnoses else "✅ 长度与相似度均在合理范围"
+    instruction_text = "\n".join(f"{i+1}. {instr}" for i, instr in enumerate(instructions))
 
-    return f"""你是短视频脚本质量审核员。请根据以下要求，逐项审核并修正脚本。
+    # 达标 → 原样返回
+    if not instructions:
+        return f"""以下脚本已通过审核（长度和相似度均达标）。**直接原样输出，不做任何修改。**
 
-## 原始生成要求
-{original_prompt}
+```json
+{script_text}
+```
+纯 JSON，无 markdown 包裹。"""
 
-## 当前生成的脚本
+    # 有诊断 → 二次仿写
+    return f"""你是短视频脚本策划，之前输出的脚本在长度或相似度上不达标，需要做一次**二次仿写**。
+
+## 参考视频分析
+{synthesis[:1500] if synthesis else "（无）"}
+
+## 当前脚本
 ```json
 {script_text}
 ```
 
-{checklist}
+## 🔴 诊断
+{diagnosis_text}
 
-## 🔴 内容相似度检查
-{similarity_warning}
+## 🔴 修改指令
+{instruction_text}
 
-## 输出要求
-- 返回修正后的**完整 JSON**（格式与原始生成一致）
-- **只输出纯 JSON**，不输出任何解释、说明、markdown 包裹
-- 如果某项已满足要求，保持原样不动；如果某项未满足，直接修正
-- **严禁**新增或删除脚本中的关键结构字段"""
+## 要求
+- 保持 JSON 结构（字段、类型）完全不变
+- 🔴 **original_text 一个字都不许改**，它是原视频文案的忠实还原，不是创作内容
+- 只调整 **dialogs（对话）** 的篇幅和措辞，降低与参考视频的相似度
+
+## 输出
+纯 JSON，无 markdown 包裹。"""

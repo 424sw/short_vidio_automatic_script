@@ -52,7 +52,7 @@ streamlit run app.py           # http://localhost:8501
 [VideoAnalyzer.synthesize()](src/video_analyzer.py#L182)：将语音转文字文本发给 AI，输出视频结构、完整口播文案、风格特征、关键信息点。不再分析视频帧。
 
 ### ② 检测脚本类型
-[ScriptGenerator.detect_type()](src/script_generator.py#L91)：在步骤 2 末尾调用，AI 根据 synthesis 判断视频适合混剪还是口播。用户可在输入面板手动选择「自动检测 / 混剪 / 口播」，自动检测失败时默认回退 `"mix"`。
+[ScriptGenerator.detect_type()](src/script_generator.py#L135)：在步骤 2 末尾调用，AI 直接根据音频转录文字判断是单人讲解还是多人对话。用户可在输入面板手动选择「自动检测 / 混剪 / 口播」，自动检测失败时默认回退 `"mix"`。
 
 ### ③ 生成脚本内容
 [ScriptGenerator.generate()](src/script_generator.py#L22)：将 synthesis 注入混剪/口播 Prompt 模板，AI 输出严格 JSON（title / hashtags / rows 或 dialogs / images / original_text），经 `_validate()` 校验后返回。最多重试 3 次。
@@ -160,7 +160,7 @@ streamlit run app.py           # http://localhost:8501
 | 内容远超参考视频 | `max_tokens` 预算太宽裕（200字给1000 token） | 公式收紧为 `(target_chars×1.5 + 300) × 1.3`，200字→780 token |
 | 对话轮数强制20轮 | 短视频也要求20轮，迫使 AI 灌水扩写 | `requirements.json` 改为 `[8, 20]`，按 `target_chars/15` 动态建议轮数；`_validate()` 只检查范围 |
 | 假取消 | 心跳只在 `st.rerun()` 时刷新，Whisper 90s阻塞导致超时 | 新增 `_touch_heartbeat()`，每个步骤开头主动刷新心跳 |
-| 口播误判成混剪 | synthesis 改为摘要后 `detect_type()` 信息不足 | `detect_type()` 新增 `audio_transcript` 参数，同时看 synthesis + 转录前800字 |
+| 口播误判成混剪 | synthesis + 标题信息不足 | `detect_type()` 改为只看音频转录文字，不依赖 synthesis |
 | AI 修不好标记 | 审核3次失败后交付缺标记的脚本 | `review()` 新增 `_fix_markers()` 兜底，程序化正则补标记；新增 `_find_missing_markers()` 列出缺失轮号 |
 
 ### 2026-06-07：排队机制已移除 🔧
@@ -357,4 +357,4 @@ WHISPER_TIMEOUT_SEC = 300    # Whisper 转录 5 分钟超时
 
 1. **飞书图片插入** — API 不支持 `block_type=27`，需另辟蹊径。
 2. **管理界面/SubAgent** — 在原有的用户界面基础上增加管理界面
-3. **其他优化** — 输出面板多脚本合并到一个文件夹；输入面板可输入个性要求（在精细输出质量中实现）；输出内容相似度高；生成过程偶尔报错（比如脚本生成错误）；手机端UI优化；“精细”功能实测不可用其他待发现问题
+3. **其他优化** — 输出面板多脚本合并到一个文件夹；输入面板可输入个性要求（在精细输出质量中实现）；输出内容相似度高；生成过程偶尔报错（比如脚本生成错误）；“自动检测”功能；手机端UI优化；“精细”功能实测不可用其他待发现问题
