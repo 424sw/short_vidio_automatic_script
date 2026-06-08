@@ -68,21 +68,7 @@ class ScriptGenerator:
 
     def _call_api(self, prompt: str, target_chars: int = 0,
                   script_type: str = "mix") -> str:
-        """调用 AI API，返回原始文本，带限流重试。max_tokens 按脚本类型动态限制。
-
-        混剪输出 ≈ 参考视频字数。口播输出含 original_text + dialogs，API 预算约 3x，但内容长度仅对比 dialogs。
-        """
-        if target_chars > 0:
-            if script_type == "oral":
-                base = int(target_chars * 3.0) + 500
-            else:
-                base = int(target_chars * 1.5) + 300
-            max_tok = max(400, int(base * 1.3))
-        else:
-            max_tok = 2800 if script_type == "oral" else 1500
-        logger.info("API 调用 max_tokens=%d (target_chars=%d, type=%s)",
-                    max_tok, target_chars, script_type)
-
+        """调用 AI API，返回原始文本，带限流重试。"""
         max_retries = 3
         for attempt in range(max_retries):
             try:
@@ -90,11 +76,10 @@ class ScriptGenerator:
                     model=AGNES_MODEL,
                     messages=[
                         {"role": "system",
-                         "content": "你是短视频脚本策划。输出纯 JSON，不用 markdown 包裹。"
-                                    "内容简洁精炼，篇幅严格匹配参考视频。"},
+                         "content": "你是短视频脚本策划。输出纯 JSON，不用 markdown 包裹。"},
                         {"role": "user", "content": prompt},
                     ],
-                    max_tokens=max_tok, temperature=0.3, timeout=120,
+                    temperature=0.3, timeout=120,
                 )
                 return response.choices[0].message.content.strip()
             except Exception as e:
