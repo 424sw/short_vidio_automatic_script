@@ -392,11 +392,13 @@ def build_review_prompt(script_json: dict, synthesis: str = "",
         if ratio > 1.2:
             diagnoses.append(f"过长：{script_chars}字 vs 参考{target_chars}字（+{int((ratio-1)*100)}%）")
             instructions.append(
-                f"**缩写+仿写**：压缩到 {lo_chars}~{hi_chars} 字。删冗余、并同类、换措辞降相似度。")
+                f"**缩写+仿写**：删减到 **{lo_chars}~{hi_chars} 字**。\\n"
+                f"🔴 只删冗余、合并同类即可，**严禁低于 {lo_chars} 字**，过度压缩会被拒绝。")
         elif ratio < 1.1:
             diagnoses.append(f"过短：{script_chars}字 vs 参考{target_chars}字（{int(ratio*100)}%）")
             instructions.append(
-                f"**扩写+仿写**：扩充到 {lo_chars}~{hi_chars} 字。补细节、丰互动、换措辞降相似度。")
+                f"**扩写+仿写**：扩充到 **{lo_chars}~{hi_chars} 字**。\\n"
+                f"🔴 适度补充细节即可，**严禁超过 {hi_chars} 字**。")
 
     if similarity > 0.4:
         diagnoses.append(f"相似度过高：{similarity*100:.0f}%（上限40%）")
