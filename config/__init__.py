@@ -220,3 +220,18 @@ MIN_FREE_DISK_BYTES = 100 * 1024 * 1024  # 100 MB
 
 # Whisper 转录超时（秒）
 WHISPER_TIMEOUT_SEC = 300  # 5 分钟
+
+# ============================================================
+# 超时常量（秒）
+# ============================================================
+HTTP_TIMEOUT_SHORT = 10          # 短链接 HEAD 请求
+HTTP_TIMEOUT_MEDIUM = 15         # 飞书认证、飞书 API 默认超时
+HTTP_TIMEOUT_LONG = 20           # 抖音页面请求
+SUBPROCESS_TIMEOUT_FFMPEG_DOWNLOAD = 180  # FFmpeg 视频下载
+SUBPROCESS_TIMEOUT_AUDIO_DURATION = 30    # FFmpeg 音频时长检测
+SUBPROCESS_TIMEOUT_AUDIO_EXTRACT = 60     # FFmpeg 音频提取
+AI_TIMEOUT_GENERATE = 120        # 脚本生成 API
+AI_TIMEOUT_REVIEW = 120          # 脚本审核 API
+
+# 脚本目标字数（固定值，约束 AI 生成篇幅）
+FIXED_TARGET_CHARS = 500

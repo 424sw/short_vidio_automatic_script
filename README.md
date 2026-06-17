@@ -64,14 +64,17 @@ AI 会自动翻译成配置变更，你确认后立刻生效。
 ## 项目结构
 
 ```
-├── app.py              # 用户界面 + 管理后台（Streamlit）
-├── config.py           # 配置、密钥、Prompt
+├── app.py                     # 用户界面（Streamlit）
 ├── src/
-│   ├── douyin_extractor.py   # 抖音链接解析
-│   ├── video_analyzer.py     # 视频分析
-│   ├── script_generator.py   # 脚本生成
-│   ├── feishu_ops.py         # 飞书 API
-│   └── session_manager.py    # 会话持久化
-├── config/requirements.json  # 脚本规则配置
-└── requirements.txt          # Python 依赖
+│   ├── douyin_extractor.py    # ① 提取：URL 解析 → 下载视频
+│   ├── video_analyzer.py      # ② 分析：音频提取 + 语音转录
+│   ├── prompt_builder.py      # Prompt 模板：混剪/口播/审核
+│   ├── script_generator.py    # ③ 生成 + ④ 审核
+│   └── feishu_ops.py          # ⑤ 飞书：模板复制 → 填充 → 公开
+├── config/
+│   ├── __init__.py            # 密钥、API 端点、边界常量、配置加载
+│   └── requirements.json      # 脚本规则配置
+├── tools/
+│   └── setup_models.py        # faster-whisper 模型下载
+└── requirements.txt           # Python 依赖
 ```

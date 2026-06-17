@@ -407,7 +407,7 @@ def _expire_documents(doc_ids: list = None):
 
 STEP_LABELS = {
     1: ("① 提取视频", "正在下载抖音视频并提取标题/作者..."),
-    2: ("② AI 分析", "正在语音转文字、AI 综合分析..."),
+    2: ("② 语音转文字", "正在提取音频并语音转文字..."),
     3: ("③ 生成脚本", "正在根据分析结果生成脚本..."),
     4: ("④ 审核微调", "AI 正在逐项审核并修正脚本..."),
     5: ("⑤ 飞书文档", "正在创建飞书文档并填充脚本内容..."),
@@ -523,7 +523,7 @@ def step1_extract():
 
 
 def step2_analyze():
-    st.session_state.status_msg = "AI 分析中..."
+    st.session_state.status_msg = "语音转文字中..."
     try:
         _touch_heartbeat()
         _check_cancel()
@@ -539,7 +539,7 @@ def step2_analyze():
         _check_cancel()
         audio_text = result.get("audio_transcript", "")
         audio_note = "（语音转文字）" if audio_text and "转录" in audio_text else ""
-        st.session_state.synthesis = result["synthesis"]
+        st.session_state.synthesis = ""  # synthesis 已删除，留空保底
         st.session_state.audio_transcript = audio_text
 
         # 用户手动选择脚本类型
@@ -563,16 +563,11 @@ def step2_analyze():
 
 
 def step3_generate():
-    synthesis = st.session_state.synthesis
+    from config import FIXED_TARGET_CHARS
+
     video_title = st.session_state.video_title
     script_count = st.session_state.get("script_count", 1)
     st.session_state.status_msg = f"正在生成{'脚本' if script_count == 1 else f'{script_count} 个脚本'}..."
-
-    if not synthesis or not synthesis.strip():
-        _cleanup_session()
-        st.session_state.error = "视频分析结果为空，无法生成脚本。请重试。"
-        st.session_state.step = 0
-        return
 
     try:
         gen = ScriptGenerator()
@@ -585,44 +580,20 @@ def step3_generate():
             except ImportError:
                 pass
 
-        # 从音频转录估算原视频口播字数，用于约束仿写篇幅
-        st.session_state.target_chars = 0
-        target_chars = 0
-        if audio_transcript:
-            import re
-            # 提取「音频转录:」之后的内容，去除元数据行
-            marker = "音频转录:\n"
-            idx = audio_transcript.find(marker)
-            if idx >= 0:
-                text = audio_transcript[idx + len(marker):]
-                text = re.sub(r'\n语言:[^\n]*', '', text)
-                text = re.sub(r'\n?⚠️.*', '', text, flags=re.DOTALL)
-            else:
-                text = audio_transcript
-            # 统计中文字数（包含中文标点）
-            chinese = len(re.findall(r'[一-鿿㐀-䶿豈-﫿]', text))
-            # 统计英文/数字词数
-            english_words = len(re.findall(r'[a-zA-Z0-9]+', text))
-            target_chars = chinese + english_words
-            st.session_state.target_chars = target_chars
-            logger.info("原视频口播估算字数: %d（中文 %d + 英文/数字 %d）", target_chars, chinese, english_words)
-
-        # 无音频时：用视频时长估算（说话速度 ~3字/秒），保底 200 字
-        if target_chars == 0:
-            duration = st.session_state.get("video_duration", 0)
-            target_chars = max(100, int(duration * 3)) if duration > 0 else 200
-            st.session_state.target_chars = target_chars
-            logger.info("无音频转录，根据时长估算字数: %d", target_chars)
+        # 固定目标字数为 500 字，约束 AI 生成篇幅
+        target_chars = FIXED_TARGET_CHARS
+        st.session_state.target_chars = target_chars
+        logger.info("使用固定目标字数: %d", target_chars)
 
         _touch_heartbeat()
         _check_cancel()
 
         if script_count == 1:
-            scripts = [gen.generate(synthesis, script_type=st.session_state.script_type,
+            scripts = [gen.generate(script_type=st.session_state.script_type,
                                     video_title=video_title, audio_transcript=audio_transcript,
                                     target_chars=target_chars)]
         else:
-            scripts = gen.generate_multiple(synthesis, st.session_state.script_type,
+            scripts = gen.generate_multiple(st.session_state.script_type,
                                             script_count, video_title=video_title,
                                             audio_transcript=audio_transcript,
                                             target_chars=target_chars)
@@ -660,7 +631,7 @@ def step4_review():
 
         refined, note = gen.review(
             script, script_type,
-            synthesis=st.session_state.get("synthesis", ""),
+            audio_transcript=st.session_state.get("audio_transcript", ""),
             target_chars=st.session_state.get("target_chars", 0))
         st.session_state.script_json = refined
         # 更新 script_jsons 中的主脚本

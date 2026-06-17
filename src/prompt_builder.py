@@ -44,40 +44,6 @@ def get_quality_config(quality: str = "standard") -> dict:
     return presets.get(quality, presets["standard"])
 
 
-def build_synthesis_prompt(video_title: str, audio_transcript: str = "") -> str:
-    """构建视频综合分析的 Prompt（基于音频转录，不分析视频帧）。"""
-    if audio_transcript:
-        audio_inst = (
-            "根据音频转录文字，还原视频完整口播文案，标注时间节点。\n\n"
-            "## 🔴 转录纠错（重要）\n"
-            "音频转录由机器自动生成，**必然存在识别错误**（尤其是网络热词、品牌名、行业术语）。"
-            "你需要**修复以下典型错误**：\n"
-            "- 音近错字：如「主包」应为「主播」、「加入们」应为「家人们」\n"
-            "- 品牌名错误：如「渔泡直聘」应为「鱼泡直聘」\n"
-            "- 中英混杂词拆错：如「offer」被识别为「哦分」、「yyds」被识别为「歪歪地爱思」\n"
-            "- 网络用语识别失败：如「芭比Q」被识别为「爸爸抠」、「栓Q」被识别为「专注抠」\n"
-            "- 断句混乱导致语义断裂\n\n"
-            f"音频转录：\n{audio_transcript}"
-        )
-    else:
-        audio_inst = "尝试推测视频的口播文案结构。"
-
-    transcript_note = "（附有语音转录文字）" if audio_transcript else ""
-    return f"""你是短视频内容分析师。请分析视频"{video_title}"{transcript_note}。
-
-## 一、视频结构
-开头钩子 → 中间展开 → 结尾总结（标注时间线）
-
-## 二、完整口播文案
-{audio_inst}
-
-## 三、风格特点
-节奏、情绪基调、语言风格
-
-## 四、关键信息点
-5-8 个核心信息点"""
-
-
 def _build_diversity_instruction(seed: int, script_type: str) -> str:
     """根据 seed 生成多样性指令，注入 Prompt 以使多个脚本差异明显。
 
@@ -125,8 +91,7 @@ def _build_diversity_instruction(seed: int, script_type: str) -> str:
 - 具体措辞、举例、比喻必须与标准版本不同"""
 
 
-def build_mix_prompt(synthesis: str,
-                      audio_transcript: str = "", variation_seed: int = 0,
+def build_mix_prompt(audio_transcript: str = "", variation_seed: int = 0,
                       target_chars: int = 0) -> str:
     """构建混剪脚本生成的 Prompt。
 
@@ -183,8 +148,18 @@ def build_mix_prompt(synthesis: str,
 
 {diversity}
 {length_constraint}
-## 视频分析
-{synthesis}
+
+## 🔴🔴 核心原则：仿写，不是创作
+- 你的任务是**模仿**参考视频的结构、信息点、节奏来**重写**一个新脚本
+- **保留**原视频的所有关键信息点（5-8个），但用**完全不同的措辞**表达
+- **保留**原视频的叙事结构（开头钩子 → 中间展开 → 结尾总结）
+- **保留**原视频的信息密度和篇幅感
+- **改变**：词汇选择、句式结构、举例、比喻、衔接方式
+- **禁止**：凭空添加原视频没有的信息点、改变叙事顺序、大幅改变篇幅
+- 把自己想象成：看了一个视频后，用自己的话向朋友转述——内容一样，说法全新
+
+## 🔴 原始音频转录（参考材料）
+{audio_transcript if audio_transcript else "（无语音转文字内容）"}
 
 ## 输出格式（纯 JSON，不用 markdown 代码块包裹）
 
@@ -206,7 +181,7 @@ def build_mix_prompt(synthesis: str,
 - 风格：**单人讲解**，口语化，仿佛对着镜头跟观众聊天
 - 🔴 **断句控制（硬性）**：每行文案 **1-3 句**，用 \\\\n 分隔。严禁 4 句及以上。**不要每行都凑到 3 句**——有的一两句能说清就用一两句，需要展开的才用 3 句。过多断句=画面切换过于频繁。
 - 🔴 **人机感（硬性）**：像真人说话，不要写成文章。大量用口语词（呢、吧、啊、嘛），多用反问和感叹，句式长短错落（短句2-4字+长句15-25字交替），严禁「此外/因此/综上所述/值得注意的是」等公文套话
-- 🔴 **措辞差异化**：核心观点可一致，但具体措辞、举例、比喻必须与参考视频不同，不得大段照搬原文
+- 🔴 **仿写硬性要求**：核心观点和信息点必须保留，但具体措辞、举例、比喻必须完全替换——这是仿写，不是创作——不要添加新信息点，不要改变叙事逻辑，不得大段照搬原文
 - 素材格式：{m.get('素材格式', '文件名.jpg 中文描述')}
 - 素材风格：{m.get('素材风格', '尽量使用动物、表情包等趣味素材')}，每条素材与对应文案内容匹配
 - 🔴 话题词：**必须正好 4-5 个**独立的中文短语，如：职场干货、面试技巧、求职指南、零基础转行
@@ -222,7 +197,7 @@ def build_mix_prompt(synthesis: str,
 {products}"""
 
 
-def build_oral_prompt(synthesis: str, audio_transcript: str = "",
+def build_oral_prompt(audio_transcript: str = "",
                       variation_seed: int = 0, target_chars: int = 0) -> str:
     """构建口播脚本生成的 Prompt。
 
@@ -304,14 +279,13 @@ def build_oral_prompt(synthesis: str, audio_transcript: str = "",
 - **不是**把参考视频的内容拉长、展开、润色（那是扩写，会被拒绝）
 - 参考视频说多少字，你就说多少字。参考视频用多快的节奏，你就用多快的节奏
 - 核心观点可以一致，但**具体措辞、举例、比喻、句式必须完全不同**
-- 把自己想象成：看了这个视频后，用自己的话复述一遍，而不是对着原文做 paraphrase
+- **信息守恒原则**：不要凭空添加原视频没有的信息，也不要遗漏原视频的关键信息
+- 把自己想象成：看了这个视频后，用自己的话向朋友复述一遍——内容一样，说法全新
 
 {audio_section}
 
 {diversity}
 {length_constraint}
-## 视频分析
-{synthesis}
 
 ## 输出格式（纯 JSON，不用 markdown 代码块包裹）
 {{{{
@@ -371,7 +345,7 @@ def build_oral_prompt(synthesis: str, audio_transcript: str = "",
 {products}"""
 
 
-def build_review_prompt(script_json: dict, synthesis: str = "",
+def build_review_prompt(script_json: dict, audio_transcript: str = "",
                         target_chars: int = 0, similarity: float = 0.0,
                         script_chars: int = 0) -> str:
     """审核微调 Prompt：**只关注两项** —— ①内容长度匹配 ②内容相似度匹配。
@@ -407,6 +381,7 @@ def build_review_prompt(script_json: dict, synthesis: str = "",
             "① 换句式：把陈述句改成反问/感叹/假设句（\"你知道吗？\"\"要是...呢？\"\"想想看！\"）\n"
             "② 换案例：把原文的具体数据、故事、举例全部换成你自己创造的同类素材\n"
             "③ 换措辞：同一个意思用完全不同的词来表达（如\"找工作\"→\"谋职\"→\"上岸\"→\"拿offer\"轮换）\n"
+            "④ **信息守恒**：替换案例和措辞时，确保原视频的关键信息点不丢失、不扭曲\n"
             "目标：改完后相似度 < 40%，不能只是换几个同义词敷衍。")
 
     diagnosis_text = "\n".join(f"- {d}" for d in diagnoses) if diagnoses else "✅ 长度与相似度均在合理范围"
@@ -429,8 +404,8 @@ def build_review_prompt(script_json: dict, synthesis: str = "",
 
     return f"""你是短视频脚本策划，之前输出的脚本在长度或相似度上不达标，需要做一次**二次仿写**。
 
-## 参考视频分析
-{synthesis[:1500] if synthesis else "（无）"}
+## 原始音频转录
+{audio_transcript[:1500] if audio_transcript else "（无）"}
 
 ## 当前脚本
 ```json

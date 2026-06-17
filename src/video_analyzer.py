@@ -1,15 +1,12 @@
-"""AI 视频分析：音频提取 + 语音转录 → AI 综合理解。"""
+"""视频分析：音频提取 + 语音转录。"""
 import gc
 import re
 import logging
 import subprocess
 from pathlib import Path
 
-from openai import OpenAI
-
-from config import AGNES_BASE_URL, AGNES_API_KEY, AGNES_MODEL, FFMPEG_PATH, load_requirements, \
-    WHISPER_TIMEOUT_SEC
-from src.prompt_builder import build_synthesis_prompt
+from config import FFMPEG_PATH, load_requirements, \
+    WHISPER_TIMEOUT_SEC, SUBPROCESS_TIMEOUT_AUDIO_DURATION, SUBPROCESS_TIMEOUT_AUDIO_EXTRACT
 
 logger = logging.getLogger(__name__)
 
@@ -20,9 +17,6 @@ _MODEL_DIR = Path(__file__).parent.parent / "tools" / "models" / "faster-whisper
 class VideoAnalysisError(Exception):
     pass
 
-
-def _make_client():
-    return OpenAI(base_url=AGNES_BASE_URL, api_key=AGNES_API_KEY, timeout=120.0)
 
 
 # ============================================================
@@ -79,6 +73,8 @@ def _build_whisper_initial_prompt() -> str:
         "全职儿女", "数字游民", "主理人",
         # 短视频平台 / 内容创作
         "素材", "文案", "口播", "混剪", "涨粉", "取关",
+        # 广告品牌名
+        "鱼泡直聘", 
     ]
     for w in hotwords:
         if w not in words:
@@ -153,7 +149,7 @@ def _transcribe_audio(audio_path: str, quality: str = "standard") -> str:
 def _audio_duration(audio_path: str) -> float:
     cmd = [FFMPEG_PATH, "-i", str(audio_path), "-f", "null", "-"]
     try:
-        r = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=SUBPROCESS_TIMEOUT_AUDIO_DURATION)
         m = re.search(r"Duration:\s*(\d+):(\d+):(\d+\.\d+)", r.stderr)
         if m:
             h, mi, s = m.groups()
@@ -183,25 +179,15 @@ class VideoAnalyzer:
             "-vn", "-acodec", "libmp3lame",
             "-ar", "16000", "-ac", "1", "-q:a", "5",
             str(ap),
-        ], capture_output=True, text=True, timeout=60)
+        ], capture_output=True, text=True, timeout=SUBPROCESS_TIMEOUT_AUDIO_EXTRACT)
         if r.returncode != 0:
             logger.warning(f"音频提取失败: {r.stderr[:200]}")
             return ""
         return str(ap)
 
-    def synthesize(self, video_title: str, audio_transcript: str) -> str:
-        """根据音频转录生成视频综合分析（不再使用帧分析）。"""
-        prompt = build_synthesis_prompt(video_title, audio_transcript)
-        client = _make_client()
-        resp = client.chat.completions.create(
-            model=AGNES_MODEL,
-            messages=[{"role": "user", "content": prompt}],
-            max_tokens=3000, timeout=120)
-        return resp.choices[0].message.content
-
     def analyze(self, video_path: str, title: str, author: str = "",
                 session_dir: str = None, quality: str = "standard") -> dict:
-        """分析视频：提取音频 + 语音转录 + AI 综合理解。
+        """分析视频：提取音频 + 语音转录。
 
         所有临时文件写入 session_dir，由调用方统一管理生命周期。
         quality: "standard" → int8 + beam=5（快）；"fine" → float32 + beam=10（更准）。
@@ -219,11 +205,6 @@ class VideoAnalyzer:
         # 2. 语音转录
         audio_transcript = _transcribe_audio(audio_path, quality=quality) if audio_path else ""
 
-        # 3. AI 综合理解（只用音频转录，不再分析帧）
-        logger.info("AI 综合分析...")
-        synthesis = self.synthesize(title, audio_transcript)
-
         return {
-            "synthesis": synthesis,
             "audio_transcript": audio_transcript,
         }

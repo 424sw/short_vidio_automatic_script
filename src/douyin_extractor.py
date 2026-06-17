@@ -12,7 +12,8 @@ from typing import Optional
 import requests
 
 from config import IPHONE_UA, FFMPEG_PATH, RETRY_MAX, RETRY_BACKOFF, \
-    MAX_VIDEO_DURATION_SEC, MIN_FREE_DISK_BYTES
+    MAX_VIDEO_DURATION_SEC, MIN_FREE_DISK_BYTES, \
+    HTTP_TIMEOUT_SHORT, HTTP_TIMEOUT_LONG, SUBPROCESS_TIMEOUT_FFMPEG_DOWNLOAD
 
 logger = logging.getLogger(__name__)
 
@@ -76,13 +77,19 @@ class DouyinExtractor:
 
         # 短链接: 先尝试跟踪重定向
         if "v.douyin.com" in url:
-            try:
-                resp = requests.head(url, allow_redirects=True, timeout=10,
-                                     headers={"User-Agent": IPHONE_UA})
-                url = resp.url
-                logger.info("短链接已跟踪: %s", url[:80])
-            except Exception as e:
-                logger.warning("短链接重定向失败: %s，尝试直接解析", e)
+            for attempt in range(RETRY_MAX):
+                try:
+                    resp = requests.head(url, allow_redirects=True,
+                                         timeout=HTTP_TIMEOUT_SHORT,
+                                         headers={"User-Agent": IPHONE_UA})
+                    url = resp.url
+                    logger.info("短链接已跟踪: %s", url[:80])
+                    break
+                except Exception as e:
+                    if attempt == RETRY_MAX - 1:
+                        logger.warning("短链接重定向失败（已重试%d次）: %s，尝试直接解析", RETRY_MAX, e)
+                    else:
+                        time.sleep(RETRY_BACKOFF * (2 ** attempt))
 
         # 模式 1: /video/1234567890123456789
         match = re.search(r'/video/(\d{15,25})', url)
@@ -121,7 +128,7 @@ class DouyinExtractor:
 
         for attempt in range(RETRY_MAX):
             try:
-                resp = self._session.get(share_url, timeout=20)
+                resp = self._session.get(share_url, timeout=HTTP_TIMEOUT_LONG)
                 break
             except requests.RequestException as e:
                 if attempt == RETRY_MAX - 1:
@@ -258,51 +265,43 @@ class DouyinExtractor:
         logger.info(f"下载视频: {video_url[:80]}...")
         logger.info(f"保存到: {output}")
 
-        # 优先使用 FFmpeg 下载（更稳定，自动处理重定向，限制时长）
-        try:
-            cmd = [
-                FFMPEG_PATH, "-y",
-                "-user_agent", IPHONE_UA,
-                "-t", str(MAX_VIDEO_DURATION_SEC),  # 限制最大时长
-                "-i", video_url,
-                "-c", "copy",
-                "-bsf:a", "aac_adtstoasc",
-                str(output),
-            ]
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=180)
-            if result.returncode == 0 and output.exists() and output.stat().st_size > 1000:
-                size_mb = output.stat().st_size / 1024 / 1024
-                logger.info(f"FFmpeg 下载成功: {size_mb:.1f}MB")
-                # 下载后检查文件大小：超过剩余空间一半时警告
-                if size_mb > free_bytes * 0.5 / (1024 * 1024):
-                    logger.warning("视频较大 (%dMB)，磁盘空间紧张，但仍继续处理", int(size_mb))
-                return output
-            logger.warning(f"FFmpeg 下载失败，回退到 requests: {result.stderr[:200]}")
-        except (subprocess.TimeoutExpired, FileNotFoundError):
-            logger.warning("FFmpeg 超时或不可用，回退到 requests")
-
-        # 回退方案：直接用 requests 下载
-        resp = self._session.get(video_url, stream=True, timeout=60)
-        resp.raise_for_status()
-
-        # 流式下载，同时监控文件大小
-        max_bytes = max(MIN_FREE_DISK_BYTES, int(free_bytes * 0.5))
-        downloaded = 0
-        with open(output, "wb") as f:
-            for chunk in resp.iter_content(chunk_size=8192):
-                f.write(chunk)
-                downloaded += len(chunk)
-                if downloaded > max_bytes:
-                    f.close()
+        # 使用 FFmpeg 下载（自动处理重定向，限制时长），带重试
+        cmd = [
+            FFMPEG_PATH, "-y",
+            "-user_agent", IPHONE_UA,
+            "-t", str(MAX_VIDEO_DURATION_SEC),  # 限制最大时长
+            "-i", video_url,
+            "-c", "copy",
+            "-bsf:a", "aac_adtstoasc",
+            str(output),
+        ]
+        for attempt in range(RETRY_MAX):
+            try:
+                result = subprocess.run(cmd, capture_output=True, text=True,
+                                        timeout=SUBPROCESS_TIMEOUT_FFMPEG_DOWNLOAD)
+                if result.returncode == 0 and output.exists() and output.stat().st_size > 1000:
+                    size_mb = output.stat().st_size / 1024 / 1024
+                    logger.info(f"FFmpeg 下载成功: {size_mb:.1f}MB")
+                    # 下载后检查文件大小：超过剩余空间一半时警告
+                    if size_mb > free_bytes * 0.5 / (1024 * 1024):
+                        logger.warning("视频较大 (%dMB)，磁盘空间紧张，但仍继续处理", int(size_mb))
+                    return output
+                # 失败：清理部分文件，准备重试
+                if output.exists():
                     output.unlink(missing_ok=True)
-                    raise DouyinError(
-                        f"视频过大（已超 {max_bytes / 1024 / 1024:.0f} MB），"
-                        f"服务器磁盘空间有限，请选择较短的视频。"
-                    )
+                logger.warning("FFmpeg 下载失败 (attempt %d/%d): %s",
+                               attempt + 1, RETRY_MAX, result.stderr[:200])
+            except subprocess.TimeoutExpired:
+                if output.exists():
+                    output.unlink(missing_ok=True)
+                logger.warning("FFmpeg 超时 (attempt %d/%d)", attempt + 1, RETRY_MAX)
+            except FileNotFoundError:
+                raise DouyinError("FFmpeg 不可用，请确保已安装 FFmpeg")
 
-        size_mb = output.stat().st_size / 1024 / 1024
-        logger.info(f"下载完成: {size_mb:.1f}MB")
-        return output
+            if attempt < RETRY_MAX - 1:
+                time.sleep(RETRY_BACKOFF * (2 ** attempt))
+
+        raise DouyinError(f"FFmpeg 下载失败（已重试 {RETRY_MAX} 次）")
 
     # ============================================================
     # 完整流程

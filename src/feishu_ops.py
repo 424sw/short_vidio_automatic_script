@@ -13,6 +13,7 @@ from config import (
     FEISHU_AUTH_URL, FEISHU_BASE_URL,
     get_folder_token, get_template_id,
     RETRY_MAX, RETRY_BACKOFF,
+    HTTP_TIMEOUT_MEDIUM,
     generate_doc_title,
 )
 
@@ -38,39 +39,49 @@ class FeishuClient:
     # ============================================================
 
     def _ensure_token(self):
-        """确保 token 有效，必要时刷新."""
+        """确保 token 有效，必要时刷新。带重试保护。"""
         if self._token and time.time() < self._token_expires_at:
             return
 
         logger.info("获取飞书 tenant_access_token...")
-        resp = self._session.post(
-            FEISHU_AUTH_URL,
-            json={"app_id": FEISHU_APP_ID, "app_secret": FEISHU_APP_SECRET},
-            timeout=15,
-        )
-        data = resp.json()
-        if resp.status_code != 200 or "tenant_access_token" not in data:
-            raise FeishuError(f"飞书认证失败: {data}")
-
-        self._token = data["tenant_access_token"]
-        expire_sec = data.get("expire", 7200)
-        self._token_expires_at = time.time() + expire_sec - 300  # 提前5分钟刷新
-        self._session.headers["Authorization"] = f"Bearer {self._token}"
-        logger.info("飞书 token 获取成功")
+        for attempt in range(RETRY_MAX):
+            try:
+                resp = self._session.post(
+                    FEISHU_AUTH_URL,
+                    json={"app_id": FEISHU_APP_ID, "app_secret": FEISHU_APP_SECRET},
+                    timeout=HTTP_TIMEOUT_MEDIUM,
+                )
+                data = resp.json()
+                if resp.status_code == 200 and "tenant_access_token" in data:
+                    self._token = data["tenant_access_token"]
+                    expire_sec = data.get("expire", 7200)
+                    self._token_expires_at = time.time() + expire_sec - 300  # 提前5分钟刷新
+                    self._session.headers["Authorization"] = f"Bearer {self._token}"
+                    logger.info("飞书 token 获取成功")
+                    return
+                else:
+                    raise FeishuError(f"飞书认证失败: {data}")
+            except (requests.RequestException, FeishuError) as e:
+                if attempt == RETRY_MAX - 1:
+                    raise FeishuError(f"飞书认证失败（已重试 {RETRY_MAX} 次）: {e}")
+                time.sleep(RETRY_BACKOFF * (2 ** attempt))
 
     def _request(self, method: str, url: str, **kwargs) -> dict:
         """带自动 token 刷新的 API 请求."""
         self._ensure_token()
 
-        timeout = kwargs.pop("timeout", 30)
+        timeout = kwargs.pop("timeout", HTTP_TIMEOUT_MEDIUM)
         for attempt in range(RETRY_MAX):
             resp = self._session.request(method, url, timeout=timeout, **kwargs)
             if resp.status_code == 401:
-                # Token 可能提前过期，强制刷新后重试
-                logger.warning("Token 过期，正在刷新...")
-                self._token_expires_at = 0
-                self._ensure_token()
-                resp = self._session.request(method, url, timeout=timeout, **kwargs)
+                # Token 可能提前过期，刷新后继续下一轮重试
+                if attempt < RETRY_MAX - 1:
+                    logger.warning("Token 过期 (attempt %d/%d)，正在刷新...", attempt + 1, RETRY_MAX)
+                    self._token_expires_at = 0
+                    self._ensure_token()
+                    time.sleep(RETRY_BACKOFF * (2 ** attempt))
+                    continue
+                # 最后一次尝试，让它落到后面的错误处理
 
             # 429 限流：等待后重试
             if resp.status_code == 429:
@@ -869,7 +880,7 @@ class FeishuClient:
         """删除飞书文档。"""
         try:
             self._request("DELETE", f"{FEISHU_BASE_URL}/drive/v1/files/{doc_id}",
-                          params={"type": "docx"}, timeout=15)
+                          params={"type": "docx"}, timeout=HTTP_TIMEOUT_MEDIUM)
             logger.info(f"文档已删除: {doc_id}")
             return True
         except FeishuError:

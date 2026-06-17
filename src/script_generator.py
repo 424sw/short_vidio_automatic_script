@@ -4,7 +4,8 @@ import logging
 import re
 import time
 from openai import OpenAI
-from config import AGNES_BASE_URL, AGNES_API_KEY, AGNES_MODEL, load_requirements
+from config import AGNES_BASE_URL, AGNES_API_KEY, AGNES_MODEL, load_requirements, \
+    AI_TIMEOUT_GENERATE
 from src.prompt_builder import build_mix_prompt, build_oral_prompt, build_review_prompt
 
 logger = logging.getLogger(__name__)
@@ -18,9 +19,9 @@ class ScriptGenerator:
 
     def __init__(self):
         self._client = OpenAI(base_url=AGNES_BASE_URL, api_key=AGNES_API_KEY,
-                             timeout=120.0)
+                             timeout=float(AI_TIMEOUT_GENERATE))
 
-    def generate(self, synthesis: str, script_type: str = "mix",
+    def generate(self, script_type: str = "mix",
                  video_title: str = "", audio_transcript: str = "",
                  variation_seed: int = 0, target_chars: int = 0) -> dict:
         """生成脚本。一次 AI 调用 + 最多一次 JSON 格式修复，不做内容校验。
@@ -28,11 +29,11 @@ class ScriptGenerator:
         格式问题交给 review() 审核微调步骤统一处理，避免重复生成浪费时间。
         """
         if script_type == "oral":
-            prompt = build_oral_prompt(synthesis, audio_transcript=audio_transcript,
+            prompt = build_oral_prompt(audio_transcript=audio_transcript,
                                        variation_seed=variation_seed,
                                        target_chars=target_chars)
         else:
-            prompt = build_mix_prompt(synthesis, audio_transcript=audio_transcript,
+            prompt = build_mix_prompt(audio_transcript=audio_transcript,
                                       variation_seed=variation_seed,
                                       target_chars=target_chars)
 
@@ -48,7 +49,7 @@ class ScriptGenerator:
         logger.info("%s脚本生成成功（由审核步骤负责质量检查）", type_label)
         return script
 
-    def generate_multiple(self, synthesis: str, script_type: str, count: int,
+    def generate_multiple(self, script_type: str, count: int,
                           video_title: str = "", audio_transcript: str = "",
                           target_chars: int = 0) -> list[dict]:
         """批量生成多个差异化脚本。"""
@@ -56,7 +57,7 @@ class ScriptGenerator:
         for i in range(count):
             logger.info("生成第 %d/%d 个脚本...", i + 1, count)
             script = self.generate(
-                synthesis, script_type=script_type,
+                script_type=script_type,
                 video_title=video_title, audio_transcript=audio_transcript,
                 variation_seed=i + 1, target_chars=target_chars,
             )
@@ -79,7 +80,7 @@ class ScriptGenerator:
                          "content": "你是短视频脚本策划。输出纯 JSON，不用 markdown 包裹。"},
                         {"role": "user", "content": prompt},
                     ],
-                    temperature=0.3, timeout=120,
+                    temperature=0.3, timeout=AI_TIMEOUT_GENERATE,
                 )
                 return response.choices[0].message.content.strip()
             except Exception as e:
@@ -117,44 +118,8 @@ class ScriptGenerator:
                 return self._parse_json(raw2)
             raise ScriptGeneratorError(f"JSON 解析失败: {e}\n原始输出: {raw[:300]}")
 
-    def detect_type(self, audio_transcript: str = "") -> str:
-        """根据音频转录检测脚本类型。
-
-        只看音频转录文字本身：是否有明显的多角色对话模式（换人说话、问答等）。
-        失败时默认返回 "mix"。
-        """
-        if not audio_transcript:
-            return "mix"
-
-        transcript_excerpt = audio_transcript[:1200]
-        prompt = f"""判断以下音频转录文字中，是单个人在讲还是两个多个人在对话。
-
-音频转录：
-{transcript_excerpt}
-
-- 如果从头到尾一个人讲 → 回复 mix
-- 如果能听出两个或多个人在交替对话 → 回复 oral
-
-只回复一个词: mix 或 oral。"""
-
-        try:
-            response = self._client.chat.completions.create(
-                model=AGNES_MODEL,
-                messages=[{"role": "user", "content": prompt}],
-                max_tokens=10,
-                temperature=0.1,
-                timeout=30,
-            )
-            answer = response.choices[0].message.content.strip().lower()
-            if "oral" in answer:
-                return "oral"
-            return "mix"
-        except Exception as e:
-            logger.warning(f"脚本类型检测失败，默认使用混剪: {e}")
-            return "mix"
-
     def review(self, script: dict, script_type: str,
-               synthesis: str = "", target_chars: int = 0) -> tuple:
+               audio_transcript: str = "", target_chars: int = 0) -> tuple:
         """AI 二次仿写审核：诊断长度偏差和相似度，聚焦缩写/扩写/降重改写。
 
         重试最多 1 次，失败回退原版。
@@ -162,7 +127,7 @@ class ScriptGenerator:
         Args:
             script: 已生成的脚本 JSON
             script_type: "mix" 或 "oral"
-            synthesis: 视频综合分析文本
+            audio_transcript: 音频转录文本
             target_chars: 参考视频口播字数
 
         Returns:
@@ -170,12 +135,12 @@ class ScriptGenerator:
         """
         # 计算脚本内容字数和相似度
         script_chars = self._count_script_chars(script, script_type)
-        similarity = self._compute_similarity(script, script_type, synthesis)
+        similarity = self._compute_similarity(script, script_type, audio_transcript)
         logger.info("审核诊断: script_chars=%d, target_chars=%d, similarity=%.1f%%",
                     script_chars, target_chars, similarity * 100)
 
         prompt = build_review_prompt(script,
-                                     synthesis=synthesis,
+                                     audio_transcript=audio_transcript,
                                      target_chars=target_chars,
                                      similarity=similarity,
                                      script_chars=script_chars)
@@ -191,7 +156,7 @@ class ScriptGenerator:
 
                 # 二次审核后的相似度复查
                 new_chars = self._count_script_chars(refined, script_type)
-                new_sim = self._compute_similarity(refined, script_type, synthesis)
+                new_sim = self._compute_similarity(refined, script_type, audio_transcript)
                 logger.info("审核后: chars=%d, similarity=%.1f%%", new_chars, new_sim * 100)
 
                 note = "审核通过" if attempt == 0 else "审核通过（第 2 次）"
@@ -262,14 +227,14 @@ class ScriptGenerator:
         return script
 
     def _compute_similarity(self, script: dict, script_type: str,
-                            synthesis: str = "") -> float:
+                            audio_transcript: str = "") -> float:
         """计算生成脚本与参考视频内容之间的字符三元组 Jaccard 相似度。
 
         返回值范围 0-1。返回 0 表示无法计算（参考文本为空）。
         阈值：超过 0.4（40%）视为相似度过高，需要降重。
         """
-        # 参考文本只用 synthesis（视频分析），不用 audio_transcript（原文转录）
-        ref_text = (synthesis or "")
+        # 参考文本使用音频转录文本
+        ref_text = (audio_transcript or "")
         if not ref_text.strip():
             return 0.0
 
