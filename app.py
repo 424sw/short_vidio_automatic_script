@@ -588,6 +588,13 @@ def step3_generate():
                               video_title=video_title, audio_transcript=audio_transcript,
                               target_lo=target_lo, target_chars=target_chars)
 
+        # 口播脚本：程序化兜底 original_text 英文标点 → 中文标点
+        # 确保即使 prompt 指令未完全生效，原片文案的标点也是中文的
+        if script_type == "oral" and "original_text" in script:
+            _punct_map_oral = {',': '，', '.': '。', '!': '！', '?': '？', ':': '：', ';': '；'}
+            for _en, _zh in _punct_map_oral.items():
+                script["original_text"] = script["original_text"].replace(_en, _zh)
+
         st.session_state.script_jsons = [script]
         st.session_state.script_json = script
         st.session_state.target_lo = target_lo
@@ -634,6 +641,9 @@ def step4_review():
             _touch_heartbeat()
             _check_cancel()
 
+            if script_type == "mix":
+                script = gen._normalize_mix_punctuation(script)
+
             report = gen.review(
                 script, script_type,
                 audio_transcript=audio_transcript,
@@ -676,6 +686,8 @@ def step4_review():
                 script = gen.micro_adjust_markers(script)
 
             # 微调后重审
+            if script_type == "mix":
+                script = gen._normalize_mix_punctuation(script)
             report = gen.review(
                 script, script_type,
                 audio_transcript=audio_transcript,

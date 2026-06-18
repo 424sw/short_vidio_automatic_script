@@ -189,6 +189,7 @@ class ScriptGenerator:
 
         规则：
         - 5 句及以上 → 不合格
+        - 4 句行不能超过 2 个（只允许偶尔点缀）
         - 2/3 句行数量尽量平衡（少数方 ≥ 25%），2+3 句行合计 ≥ 65%
         """
         issues = []
@@ -214,16 +215,22 @@ class ScriptGenerator:
         if counts["5+"] > 0:
             return {"pass": False, "issues": issues}
 
+        # ② 4-segment rows → at most 2
+        if counts[4] > 2:
+            issues.append(
+                f"4句行过多: {counts[4]}行（最多2行），需将部分4句行合并为2-3句")
+            return {"pass": False, "issues": issues}
+
         n2, n3 = counts[2], counts[3]
         n23 = n2 + n3
 
-        # ② 2+3 < 65% → fail
+        # ③ 2+3 < 65% → fail
         if n23 / total < 0.65:
             issues.append(
                 f"2-3句行占比不足: {n23}/{total} ({n23*100//total}%，需≥65%)")
             return {"pass": False, "issues": issues}
 
-        # ③ 2 vs 3 失衡 → fail
+        # ④ 2 vs 3 失衡 → fail
         if n23 > 0:
             minority_ratio = min(n2, n3) / n23
             if minority_ratio < 0.25:
@@ -278,6 +285,50 @@ class ScriptGenerator:
             return {"pass": False, "issues": issues}
         return {"pass": True, "issues": []}
 
+    def _normalize_mix_punctuation(self, script: dict) -> dict:
+        """程序化清理混剪脚本标点：逗号/句号 → 删除 + 合并短段。
+
+        逗号和句号是行内小停顿，AI 用来保持语言连贯。
+        删除后语句自然衔接。删除后若出现过短 \\n 段（<8字），与后一段合并。
+        """
+        if "rows" not in script:
+            return script
+
+        cleaned = 0
+        merged = 0
+        for i, row in enumerate(script.get("rows", [])):
+            if isinstance(row, list) and len(row) >= 1:
+                text = str(row[0])
+                # Step 1: 删除逗号/句号（让语句自然衔接）
+                new_text = text.replace('，', '').replace('。', '').replace(',', '').replace('.', '')
+                if new_text != text:
+                    cleaned += 1
+
+                # Step 2: 合并过短段（<8 字）到后一段
+                segments = [p.strip() for p in new_text.split('\n') if p.strip()]
+                if len(segments) > 1:
+                    old_count = len(segments)
+                    result = []
+                    k = 0
+                    while k < len(segments):
+                        if len(segments[k]) < 8 and k + 1 < len(segments):
+                            result.append(segments[k] + segments[k + 1])
+                            k += 2
+                        else:
+                            result.append(segments[k])
+                            k += 1
+                    new_text = '\n'.join(result)
+                    if len(result) != old_count:
+                        merged += 1
+
+                row[0] = new_text
+
+        if cleaned > 0:
+            logger.info("程序化标点清理: %d 行逗号/句号已删除", cleaned)
+        if merged > 0:
+            logger.info("程序化短段合并: %d 行过短段已合并", merged)
+        return script
+
     def _find_missing_markers(self, script: dict) -> list:
         """扫描口播脚本，返回所有缺少末尾【标记】的对话轮号列表。"""
         missing = []
@@ -309,10 +360,12 @@ class ScriptGenerator:
         return script
 
     def _check_marker_distribution(self, script: dict) -> dict:
-        """检查口播脚本情绪标记：只允许 2/4 字 + 数量基本对称。
+        """检查口播脚本情绪标记：只允许 2/4 字 + 4 字为主、至少 1 个 2 字点缀。
         返回 pass=False 当且仅当满足以下任一条件：
-        - 存在 3/5/其他长度（非法）
-        - 2 字和 4 字数量严重失衡（少数方 < 30%）
+        - 存在非 2/4 字长度（非法）
+        - 一个 2 字都没有（全是 4 字，缺少节奏变化）
+        - 2 字标记超过 3 个
+        - 2 字标记多于 4 字标记
         """
         markers = []
         for d in script.get("dialogs", []):
@@ -335,9 +388,15 @@ class ScriptGenerator:
             illegal = [m for m in markers if len(m) not in (2, 4)]
             return {"pass": False, "details": f"非法长度: {illegal} → {details}"}
 
-        minority_ratio = min(len_2, len_4) / total if total > 0 else 0
-        if minority_ratio < 0.25:
-            return {"pass": False, "details": f"失衡: {details}"}
+        # 至少 1 个 2 字标记（节奏变化）
+        if len_2 == 0:
+            return {"pass": False, "details": f"全是4字标记缺少节奏变化，需至少1个2字: {details}"}
+
+        # 4 字为主，2 字只作点缀：不超过 3 个，且不多于 4 字
+        if len_2 > 3:
+            return {"pass": False, "details": f"2字标记过多({len_2}个，需≤3个): {details}"}
+        if len_2 > len_4:
+            return {"pass": False, "details": f"2字标记多于4字: {details}"}
 
         return {"pass": True, "details": details}
 
@@ -357,9 +416,9 @@ class ScriptGenerator:
             for issue in report["paragraph_count"]["issues"]:
                 diagnoses.append(f"段落节奏: {issue}")
             instructions.append(
-                "段落节奏修复：① 5句以上的行，把行内某些断句合并，减至2-3句；"
-                "② 如果3句行太多2句行太少，把部分3句行内部的断句合并成2句；"
-                "③ 行数不变、每行对应哪个素材不变，只调每行内部的断句数量。不添加标点符号、不改变口播风格")
+                "段落节奏修复：① 4句以上的行，把行内某些断句合并，减至2-3句；"
+                "② 如果2句行和3句行数量失衡，把多数方部分行向少数方调整（2→3拆分 或 3→2合并），单句行必须拆分出内部断句变成2-3句；"
+                "③ 行数不变、每行对应哪个素材不变，只调每行内部的断句数量。保持口语叙事节奏")
 
         if not report["length"]["pass"]:
             chars = report["length"]["chars"]
@@ -411,6 +470,7 @@ class ScriptGenerator:
 ## 约束
 - 保持 JSON 结构（字段、类型）完全不变{marker_rule}
 - 🔴 original_text 一个字都不许改
+- 🔴 品牌名「鱼泡直聘」禁止改写、禁止删除、禁止替换
 - 保持仿写风格和话题方向不变
 
 ## 当前脚本
@@ -462,7 +522,8 @@ class ScriptGenerator:
             prompt = f"""修正以下情绪标记的长度。
 原始标记: {json.dumps(to_fix, ensure_ascii=False)}
 目标长度: {json.dumps(target_lens, ensure_ascii=False)}
-规则: 保留原始情感含义，改为目标字数（2或4字）。
+规则: 保留原始情感含义，改为目标字数。**新标记必须是自然存在的中文短语**（如好奇、恍然大悟、哭笑不得），
+严禁生造词（如奇问、续探、专荐）或字符拼接（如好奇好奇、好奇追问→好奇）。
 返回: {{"converted": {{"原标记": "新标记", ...}}}}，纯 JSON。"""
 
             mapping = self._batch_convert_markers(prompt)
@@ -487,37 +548,54 @@ class ScriptGenerator:
         if n2 + n4 < 2:
             return script
 
-        # Phase 2: balance — convert from majority to minority
-        target_each = (n2 + n4) // 2
-        if n2 < target_each:
-            convert_count = min(target_each - n2, n4)
-            target_len = 2
-        elif n4 < target_each:
-            convert_count = min(target_each - n4, n2)
-            target_len = 4
-        else:
-            return script  # already balanced
+        # Phase 2: ensure 4-char dominant with at least 1 two-char marker
+        # Valid range: 1 ≤ n2 ≤ min(3, n4)
+        min_2 = 1  # at least one 2-char for rhythm variety
+        max_2 = min(3, n4)  # 2-char is minority, ≤3 and ≤n4
 
-        if convert_count <= 0:
-            return script
+        if n2 < min_2 and n4 >= 1:
+            # All 4-char, missing rhythm — convert 1 or 2 of 4→2
+            convert_count = min_2 - n2
+            to_convert = _random.sample(len_4, min(convert_count, len(len_4)))
+            marker_list = [mk for (_, mk) in to_convert]
 
-        pool = len_4 if target_len == 2 else len_2
-        to_convert = _random.sample(pool, convert_count)
-        marker_list = [mk for (_, mk) in to_convert]
+            logger.info("标记微调: 2字×%d 4字×%d → %d个4字转2字补充节奏",
+                        n2, n4, len(to_convert))
 
-        logger.info("标记微调: 2字×%d 4字×%d → %d个转%d字以求平衡",
-                    n2, n4, convert_count, target_len)
-
-        prompt = f"""将以下情绪标记转换为约{target_len}字版本，保留原始情感含义。
+            prompt = f"""将以下情绪标记转换为2字版本，保留原始情感含义。
 标记列表: {json.dumps(marker_list, ensure_ascii=False)}
+**新标记必须是自然存在的2字中文短语**（如恍然大悟→感慨、积极鼓励→鼓励、深有同感→赞同），
+严禁生造词。
 返回: {{"converted": {{"原标记": "新标记", ...}}}}，纯 JSON。"""
 
-        mapping = self._batch_convert_markers(prompt)
-        for idx, old_marker in to_convert:
-            new_marker = mapping.get(old_marker)
-            if new_marker and new_marker != old_marker:
-                dialogs[idx][1] = dialogs[idx][1].replace(
-                    f"【{old_marker}】", f"【{new_marker}】")
+            mapping = self._batch_convert_markers(prompt)
+            for idx, old_marker in to_convert:
+                new_marker = mapping.get(old_marker)
+                if new_marker and new_marker != old_marker:
+                    dialogs[idx][1] = dialogs[idx][1].replace(
+                        f"【{old_marker}】", f"【{new_marker}】")
+
+        elif n2 > max_2:
+            # Too many 2-char — convert excess to 4-char
+            convert_count = n2 - max_2
+            to_convert = _random.sample(len_2, convert_count)
+            marker_list = [mk for (_, mk) in to_convert]
+
+            logger.info("标记微调: 2字×%d 4字×%d → %d个2字转4字以求平衡",
+                        n2, n4, convert_count)
+
+            prompt = f"""将以下情绪标记转换为约4字版本，保留原始情感含义。
+标记列表: {json.dumps(marker_list, ensure_ascii=False)}
+**新标记必须是自然存在的中文短语**（如好奇→好奇心使然、无奈→无奈摇头），
+严禁生造词或字符拼接。
+返回: {{"converted": {{"原标记": "新标记", ...}}}}，纯 JSON。"""
+
+            mapping = self._batch_convert_markers(prompt)
+            for idx, old_marker in to_convert:
+                new_marker = mapping.get(old_marker)
+                if new_marker and new_marker != old_marker:
+                    dialogs[idx][1] = dialogs[idx][1].replace(
+                        f"【{old_marker}】", f"【{new_marker}】")
 
         return script
 
@@ -535,8 +613,17 @@ class ScriptGenerator:
                 if attempt == 0:
                     prompt = f"上次输出 JSON 解析失败：{e}\n请严格按格式输出。\n\n{prompt}"
 
-        logger.info("标记转换 AI 耗尽，使用算法兜底")
-        # Simple algorithmic fallback
+        logger.info("标记转换 AI 耗尽，使用内置标记表兜底")
+        # 内置自然中文情绪标记表（4字 + 2字），不拼接字符
+        _MARKER_4 = [
+            "恍然大悟", "好奇追问", "热心推荐", "感慨万千", "积极鼓励",
+            "认真分析", "由衷赞叹", "无奈摇头", "充满期待", "真诚分享",
+            "哭笑不得", "将信将疑", "点头赞同", "拍案叫绝", "深有同感",
+        ]
+        _MARKER_2 = ["好奇", "赞同", "无奈", "兴奋", "感慨", "推荐", "疑惑", "鼓励"]
+
+        target_len = 2 if "2字" in prompt else 4
+        pool = _MARKER_2 if target_len == 2 else _MARKER_4
         import re as _re, ast as _ast
         marker_list_match = _re.search(r'\[([^\]]+)\]', prompt)
         if marker_list_match:
@@ -546,13 +633,10 @@ class ScriptGenerator:
                 marker_list = []
         else:
             marker_list = []
-        target_len = 2 if "2字" in prompt else 4
+
         mapping = {}
-        for old_marker in marker_list:
-            if target_len == 4:
-                mapping[old_marker] = old_marker + old_marker  # e.g. "好奇" → "好奇好奇"
-            else:
-                mapping[old_marker] = old_marker[:2]  # e.g. "好奇追问" → "好奇"
+        for i, old_marker in enumerate(marker_list):
+            mapping[old_marker] = pool[i % len(pool)]
         return mapping
 
     def _check_ai_flavor(self, script: dict, script_type: str) -> dict:

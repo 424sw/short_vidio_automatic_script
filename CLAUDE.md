@@ -127,17 +127,18 @@ git push modelscope deploy:master
 git checkout main && git branch -D deploy
 ```
 
-## ⚠️ Streamlit 缓存清理
+## 代码更新后测试流程
 
-Streamlit 只热重载 `app.py`，`src/` 模块不会自动刷新。代码已用 `importlib.reload()` 化解，但 `.pyc` 缓存偶尔残留。
+```
+# 1. 清缓存
+find . -name "__pycache__" -type d -exec rm -rf {} +
 
-**症状**：代码改了不生效，报错与实际不符。
+# 2. 杀端口
+netstat -ano | grep 8501 | awk '{print $NF}' | sort -u | while read pid; do taskkill //F //PID $pid; done
 
-**解决办法**：
-1. 删 `__pycache__`：`find . -name "__pycache__" -type d -exec rm -rf {} +`
-2. 杀进程：`netstat -ano | grep 8501` 找到 PID → `taskkill //F //PID <PID>`
-3. 等端口释放后重启：`streamlit run app.py --server.port 8501`
-4. 不需要检查是否重启成功！
+# 3. 重启
+streamlit run app.py --server.port 8501
+```
 
 ## 后续规划
 

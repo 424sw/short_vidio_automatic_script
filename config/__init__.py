@@ -229,5 +229,5 @@ SUBPROCESS_TIMEOUT_AUDIO_EXTRACT = 60     # FFmpeg 音频提取
 AI_TIMEOUT_GENERATE = 120        # 脚本生成 / 审核 API
 
 # 脚本目标字数（上下限，约束 AI 生成篇幅）
-FIXED_TARGET_CHARS_MIX = (300, 400)   # 混剪：(下限, 上限)
-FIXED_TARGET_CHARS_ORAL = (400, 500)  # 口播：(下限, 上限)
+FIXED_TARGET_CHARS_MIX = (250, 350)   # 混剪：(下限, 上限)
+FIXED_TARGET_CHARS_ORAL = (350, 450)  # 口播：(下限, 上限)
