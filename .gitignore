@@ -35,6 +35,9 @@ data/.expiry_queue.tmp
 .DS_Store
 Thumbs.db
 
+# Linter
+.ruff_cache/
+
 # IDE
 .vscode/
 .idea/
