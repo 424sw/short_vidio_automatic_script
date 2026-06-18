@@ -205,10 +205,6 @@ def load_requirements() -> dict:
 # 边界控制常量（面向 ModelScope 单实例部署）
 # ============================================================
 
-# 输出数目上限
-MAX_SCRIPT_COUNT = 5
-
-
 # 飞书文档存活时间（秒），超时自动删除
 DOC_TTL_SECONDS = 300  # 5 分钟
 
@@ -233,5 +229,6 @@ SUBPROCESS_TIMEOUT_AUDIO_EXTRACT = 60     # FFmpeg 音频提取
 AI_TIMEOUT_GENERATE = 120        # 脚本生成 API
 AI_TIMEOUT_REVIEW = 120          # 脚本审核 API
 
-# 脚本目标字数（固定值，约束 AI 生成篇幅）
-FIXED_TARGET_CHARS = 500
+# 脚本目标字数（上下限，约束 AI 生成篇幅）
+FIXED_TARGET_CHARS_MIX = (300, 400)   # 混剪：(下限, 上限)
+FIXED_TARGET_CHARS_ORAL = (400, 500)  # 口播：(下限, 上限)

@@ -6,7 +6,7 @@ import time
 from openai import OpenAI
 from config import AGNES_BASE_URL, AGNES_API_KEY, AGNES_MODEL, load_requirements, \
     AI_TIMEOUT_GENERATE
-from src.prompt_builder import build_mix_prompt, build_oral_prompt, build_review_prompt
+from src.prompt_builder import build_mix_prompt, build_oral_prompt
 
 logger = logging.getLogger(__name__)
 
@@ -23,25 +23,19 @@ class ScriptGenerator:
 
     def generate(self, script_type: str = "mix",
                  video_title: str = "", audio_transcript: str = "",
-                 variation_seed: int = 0, target_chars: int = 0) -> dict:
-        """生成脚本。一次 AI 调用 + 最多一次 JSON 格式修复，不做内容校验。
-
-        格式问题交给 review() 审核微调步骤统一处理，避免重复生成浪费时间。
-        """
+                 target_lo: int = 0, target_chars: int = 0) -> dict:
+        """生成脚本。一次 AI 调用 + 最多一次 JSON 格式修复，不做内容校验。"""
         if script_type == "oral":
             prompt = build_oral_prompt(audio_transcript=audio_transcript,
-                                       variation_seed=variation_seed,
-                                       target_chars=target_chars)
+                                       target_lo=target_lo, target_chars=target_chars)
         else:
             prompt = build_mix_prompt(audio_transcript=audio_transcript,
-                                      variation_seed=variation_seed,
-                                      target_chars=target_chars)
+                                      target_lo=target_lo, target_chars=target_chars)
 
         type_label = "口播" if script_type == "oral" else "混剪"
         src = f"（来源: {video_title}）" if video_title else ""
         logger.info("生成%s脚本%s...", type_label, src)
 
-        # 一次 AI 调用，直接解析 JSON（不重试，失败就报错）
         raw = self._call_api(prompt, target_chars=target_chars,
                             script_type=script_type)
         script = self._parse_json(raw)
@@ -49,27 +43,9 @@ class ScriptGenerator:
         logger.info("%s脚本生成成功（由审核步骤负责质量检查）", type_label)
         return script
 
-    def generate_multiple(self, script_type: str, count: int,
-                          video_title: str = "", audio_transcript: str = "",
-                          target_chars: int = 0) -> list[dict]:
-        """批量生成多个差异化脚本。"""
-        scripts = []
-        for i in range(count):
-            logger.info("生成第 %d/%d 个脚本...", i + 1, count)
-            script = self.generate(
-                script_type=script_type,
-                video_title=video_title, audio_transcript=audio_transcript,
-                variation_seed=i + 1, target_chars=target_chars,
-            )
-            scripts.append(script)
-            # 节流：避免连续请求打爆 API
-            if i < count - 1:
-                time.sleep(1.5)
-        return scripts
-
     def _call_api(self, prompt: str, target_chars: int = 0,
                   script_type: str = "mix") -> str:
-        """调用 AI API，返回原始文本，带限流重试。"""
+        """调用 AI API，返回原始文本，任意异常均重试（最多3次）。"""
         max_retries = 3
         for attempt in range(max_retries):
             try:
@@ -84,12 +60,10 @@ class ScriptGenerator:
                 )
                 return response.choices[0].message.content.strip()
             except Exception as e:
-                msg = str(e).lower()
-                is_rate_limited = any(kw in msg for kw in
-                    ("429", "rate limit", "too many requests", "503", "service unavailable"))
-                if is_rate_limited and attempt < max_retries - 1:
+                if attempt < max_retries - 1:
                     wait = 0.5 * (2 ** attempt)
-                    logger.warning("API 限流，等待 %.1fs 后重试 (%d/%d)...", wait, attempt + 1, max_retries)
+                    logger.warning("API 调用失败 (attempt %d/%d)，%.1fs 后重试: %s",
+                                   attempt + 1, max_retries, wait, e)
                     time.sleep(wait)
                     continue
                 raise
@@ -119,62 +93,81 @@ class ScriptGenerator:
             raise ScriptGeneratorError(f"JSON 解析失败: {e}\n原始输出: {raw[:300]}")
 
     def review(self, script: dict, script_type: str,
-               audio_transcript: str = "", target_chars: int = 0) -> tuple:
-        """AI 二次仿写审核：诊断长度偏差和相似度，聚焦缩写/扩写/降重改写。
+               audio_transcript: str = "", target_lo: int = 0, target_chars: int = 0) -> dict:
+        """全维度程序化合规检查。不调用 AI，纯 Python 判定。"""
+        report = {
+            "format": {"pass": True, "issues": []},
+            "length": {"pass": True, "chars": 0, "target_lo": target_lo, "target_hi": target_chars},
+            "similarity": {"pass": True, "score": 0.0},
+            "ai_flavor": {"pass": True, "detected": []},
+            "marker_distribution": {"pass": True, "details": "N/A"},
+            "paragraph_count": {"pass": True, "issues": []},
+            "ad_placement": {"pass": True, "issues": []},
+            "punctuation": {"pass": True, "issues": []},
+        }
 
-        重试最多 1 次，失败回退原版。
-
-        Args:
-            script: 已生成的脚本 JSON
-            script_type: "mix" 或 "oral"
-            audio_transcript: 音频转录文本
-            target_chars: 参考视频口播字数
-
-        Returns:
-            (script, note): 修正后的脚本 + 审核结果描述
-        """
-        # 计算脚本内容字数和相似度
-        script_chars = self._count_script_chars(script, script_type)
-        similarity = self._compute_similarity(script, script_type, audio_transcript)
-        logger.info("审核诊断: script_chars=%d, target_chars=%d, similarity=%.1f%%",
-                    script_chars, target_chars, similarity * 100)
-
-        prompt = build_review_prompt(script,
-                                     audio_transcript=audio_transcript,
-                                     target_chars=target_chars,
-                                     similarity=similarity,
-                                     script_chars=script_chars)
         type_label = "口播" if script_type == "oral" else "混剪"
-        logger.info("审核微调%s脚本...", type_label)
 
-        # 最多 2 次尝试：首次 + 1 次重试
-        for attempt in range(2):
-            try:
-                raw = self._call_api(prompt, script_type=script_type)
-                refined = self._parse_json(raw, retry_prompt=prompt)
-                self._validate(refined, script_type)
+        # 1. 格式检查
+        try:
+            self._validate(script, script_type)
+        except ScriptGeneratorError as e:
+            report["format"]["pass"] = False
+            report["format"]["issues"].append(str(e))
 
-                # 二次审核后的相似度复查
-                new_chars = self._count_script_chars(refined, script_type)
-                new_sim = self._compute_similarity(refined, script_type, audio_transcript)
-                logger.info("审核后: chars=%d, similarity=%.1f%%", new_chars, new_sim * 100)
+        # 1.5 混剪段数检查
+        if script_type == "mix":
+            report["paragraph_count"] = self._check_paragraph_count(script)
+            report["punctuation"] = self._check_punctuation(script)
 
-                note = "审核通过" if attempt == 0 else "审核通过（第 2 次）"
-                logger.info("审核完成（第 %d 次）", attempt + 1)
-                return refined, note
-            except (ScriptGeneratorError, json.JSONDecodeError) as e:
-                if attempt == 0:
-                    logger.warning("审核失败（第 1 次）: %s，重试...", e)
-                    # 重试用同一个 prompt，不堆积错误信息
-                    prompt = f"上次输出被拒绝：{e}\n请严格按格式输出完整纯 JSON。\n\n" + prompt
-                else:
-                    logger.warning("审核 2 次均失败，回退原版: %s", e)
+        # 2. 长度检查
+        script_chars = self._count_script_chars(script, script_type)
+        report["length"]["chars"] = script_chars
+        if target_lo > 0 and target_chars > 0:
+            if script_chars < target_lo or script_chars > target_chars:
+                report["length"]["pass"] = False
 
-        # 耗尽重试：回退原版 + 程序化补标记
-        logger.warning("审核回退使用原始脚本")
+        # 3. 相似度检查
+        similarity = self._compute_similarity(script, script_type, audio_transcript)
+        report["similarity"]["score"] = similarity
+        if similarity > 0.4:
+            report["similarity"]["pass"] = False
+
+        # 4. 情绪标记分布（仅口播）
         if script_type == "oral":
-            script = self._fix_markers(dict(script))  # 副本上修复
-        return script, "审核未通过，使用原始脚本（请人工复核）"
+            report["marker_distribution"] = self._check_marker_distribution(script)
+
+        # 5. AI 味检测
+        report["ai_flavor"] = self._check_ai_flavor(script, script_type)
+
+        # 6. 广告植入检查
+        report["ad_placement"] = self._check_brand_presence(script, script_type)
+
+        report["needs_rollback"] = not report["format"]["pass"] or not report["length"]["pass"]
+        report["needs_micro"] = (
+            not report["similarity"]["pass"]
+            or not report["ai_flavor"]["pass"]
+            or not report["marker_distribution"]["pass"]
+            or not report["paragraph_count"]["pass"]
+            or not report["ad_placement"]["pass"]
+            or not report["punctuation"]["pass"]
+        )
+
+        logger.info("审核 %s: format=%s length=%s chars=%d/%d~%d sim=%.0f%% ai_flavor=%s marker=%s para=%s ad=%s punct=%s → rollback=%s micro=%s",
+                    type_label,
+                    "✓" if report["format"]["pass"] else "✗",
+                    "✓" if report["length"]["pass"] else "✗",
+                    script_chars, target_lo, target_chars,
+                    similarity * 100,
+                    "✓" if report["ai_flavor"]["pass"] else "✗",
+                    "✓" if report["marker_distribution"]["pass"] else "✗",
+                    "✓" if report["paragraph_count"]["pass"] else "✗",
+                    "✓" if report["ad_placement"]["pass"] else "✗",
+                    "✓" if report["punctuation"]["pass"] else "✗",
+                    "Y" if report["needs_rollback"] else "N",
+                    "Y" if report["needs_micro"] else "N")
+
+        return report
 
     def _count_script_chars(self, script: dict, script_type: str) -> int:
         """统计「正式创作内容」的中文字数。口播只统计 dialogs，original_text 是原文还原，长度约束不包含它。"""
@@ -184,17 +177,74 @@ class ScriptGenerator:
             for d in script.get("dialogs", []):
                 if isinstance(d, list) and len(d) >= 2:
                     parts.append(str(d[1]))
-            for i in script.get("images", []):
-                parts.append(str(i))
         else:
             for r in script.get("rows", []):
                 if isinstance(r, list) and len(r) >= 1:
                     parts.append(str(r[0]))
-                if isinstance(r, list) and len(r) >= 2:
-                    parts.append(str(r[1]))
-        # 统计中文字符
         text = " ".join(parts)
         return len(_re.findall(r'[一-鿿]', text))
+
+    def _check_paragraph_count(self, script: dict) -> dict:
+        """混剪：每行分段数检查。
+
+        规则：以 2-3 句为主流节奏，偶尔 1 或 4 句为变化。
+        5 句及以上 → 不合格。
+        """
+        issues = []
+        for i, row in enumerate(script.get("rows", [])):
+            if isinstance(row, list) and len(row) >= 1:
+                paragraphs = [p for p in str(row[0]).split("\n") if p.strip()]
+                n = len(paragraphs)
+                if n >= 5:
+                    issues.append(f"第{i+1}行 {n} 段 → 需合并到 2-4 段")
+        if issues:
+            return {"pass": False, "issues": issues}
+        return {"pass": True, "issues": []}
+
+    def _check_brand_presence(self, script: dict, script_type: str) -> dict:
+        """检查广告品牌是否在脚本正文中出现。
+
+        扫描混剪 rows[0] 或口播 dialogs[1]，搜索配置中的品牌名。
+        """
+        from config import load_requirements
+        req = load_requirements()
+        brand = req.get("混剪", {}).get("广告", {}).get("品牌", "鱼泡直聘")
+
+        texts = []
+        if script_type == "oral":
+            for d in script.get("dialogs", []):
+                if isinstance(d, list) and len(d) >= 2:
+                    texts.append(str(d[1]))
+        else:
+            for r in script.get("rows", []):
+                if isinstance(r, list) and len(r) >= 1:
+                    texts.append(str(r[0]))
+        combined = " ".join(texts)
+
+        if brand not in combined:
+            return {"pass": False, "issues": [f"广告品牌「{brand}」未在脚本正文中出现"]}
+        return {"pass": True, "issues": []}
+
+    def _check_punctuation(self, script: dict) -> dict:
+        """混剪：检查正文中是否包含标点符号。
+
+        规则：文案必须纯口语，用自然换行分隔停顿，不允许任何标点符号。
+        """
+        # 中文标点 + 英文标点（允许空格和换行作为分隔）
+        punct_pattern = re.compile(
+            r'[]，。！？、；：""''「」『』【】《》（）…—～,.!?;:\"\'#@&*+=/\\|<>`~^[({}-]'
+        )
+        issues = []
+        for i, row in enumerate(script.get("rows", [])):
+            if isinstance(row, list) and len(row) >= 1:
+                text = str(row[0])
+                matches = punct_pattern.findall(text)
+                if matches:
+                    unique = list(dict.fromkeys(matches))  # 去重保序
+                    issues.append(f"第{i+1}行含标点: {''.join(unique)}")
+        if issues:
+            return {"pass": False, "issues": issues}
+        return {"pass": True, "issues": []}
 
     def _find_missing_markers(self, script: dict) -> list:
         """扫描口播脚本，返回所有缺少末尾【标记】的对话轮号列表。"""
@@ -207,7 +257,7 @@ class ScriptGenerator:
         return missing
 
     def _fix_markers(self, script: dict) -> dict:
-        """程序化补全口播脚本中缺失的末尾【标记】。不依赖 AI，稳定可靠。"""
+        """程序化补全口播脚本中缺失的末尾【标记】。"""
         if "dialogs" not in script:
             return script
         default_markers = [
@@ -226,19 +276,243 @@ class ScriptGenerator:
             logger.info("程序化补全了 %d 处缺失的【标记】", fixed_count)
         return script
 
+    def _check_marker_distribution(self, script: dict) -> dict:
+        """检查口播脚本情绪标记的长度分布。全 2 字或全 4 字视为不达标。"""
+        markers = []
+        for d in script.get("dialogs", []):
+            if isinstance(d, list) and len(d) >= 2:
+                text = str(d[1]).strip() if d[1] else ""
+                m = re.search(r'【([^】]+)】\s*$', text)
+                if m:
+                    markers.append(m.group(1))
+
+        if not markers:
+            return {"pass": True, "details": "无标记"}
+
+        total = len(markers)
+        len_2 = sum(1 for m in markers if len(m) == 2)
+        len_3 = sum(1 for m in markers if len(m) == 3)
+        len_4 = sum(1 for m in markers if len(m) == 4)
+        details = f"{total}个标记: 2字×{len_2}, 3字×{len_3}, 4字×{len_4}"
+
+        if len_2 == total or len_4 == total:
+            return {"pass": False, "details": f"单一长度: {details}"}
+
+        return {"pass": True, "details": details}
+
+    def micro_adjust(self, script: dict, script_type: str, report: dict,
+                     audio_transcript: str = "", target_lo: int = 0, target_chars: int = 0) -> dict:
+        """AI 微调正文：一次 AI 调用修复格式/长度/相似度/AI 味/段数。"""
+        script_text = json.dumps(script, ensure_ascii=False, indent=2)
+        diagnoses = []
+        instructions = []
+
+        if not report["format"]["pass"]:
+            for issue in report["format"]["issues"]:
+                diagnoses.append(f"格式错误: {issue}")
+            instructions.append("修复上述格式问题，确保 JSON 所有字段和结构符合要求")
+
+        if not report.get("paragraph_count", {}).get("pass", True):
+            for issue in report["paragraph_count"]["issues"]:
+                diagnoses.append(f"断句过多: {issue}")
+            instructions.append("把 5+ 句的行合并到 2-3 句，保持在 2-3 句的主流节奏。不要添加标点符号、不改变口播风格")
+
+        if not report["length"]["pass"]:
+            chars = report["length"]["chars"]
+            lo, hi = target_lo, target_chars
+            if chars < lo:
+                diagnoses.append(f"字数不足: {chars} 字（需 {lo}~{hi}）")
+                instructions.append(f"扩写到 {lo}~{hi} 字，适度补充细节但不要注水")
+            else:
+                diagnoses.append(f"字数超标: {chars} 字（需 {lo}~{hi}）")
+                instructions.append(f"压缩到 {lo}~{hi} 字，删冗余合并同类表达")
+
+        if not report["similarity"]["pass"]:
+            sim_pct = report["similarity"]["score"] * 100
+            diagnoses.append(f"与参考内容相似度过高: {sim_pct:.0f}%（上限 40%）")
+            instructions.append("降重: ①换句式（陈述→反问/感叹）②换案例/举例 ③换措辞（同义替换，不能只改几个词敷衍）")
+
+        if not report["ai_flavor"]["pass"]:
+            for item in report["ai_flavor"]["detected"]:
+                diagnoses.append(f"AI 写作痕迹: {item}")
+            instructions.append("替换或重写上述 AI 痕迹，用口语/接地气的表达替代")
+
+        if not report["ad_placement"]["pass"]:
+            for issue in report["ad_placement"]["issues"]:
+                diagnoses.append(f"广告缺失: {issue}")
+            instructions.append("在脚本前半段自然插入品牌名「鱼泡直聘」及相关产品介绍（1-2句话），不要生硬打断原有节奏")
+
+        if not report["punctuation"]["pass"]:
+            for issue in report["punctuation"]["issues"]:
+                diagnoses.append(f"标点符号: {issue}")
+            instructions.append("移除所有标点符号（逗号、句号、感叹号、问号等），用自然换行分隔停顿，保持纯口语节奏")
+
+        if not diagnoses:
+            return script
+
+        diagnosis_text = "\n".join(f"- {d}" for d in diagnoses)
+        instruction_text = "\n".join(f"{i+1}. {instr}" for i, instr in enumerate(instructions))
+
+        is_oral = script_type == "oral"
+        marker_rule = "-\n 🔴 每轮对话末尾的【标记】一个都不许改\n" if is_oral else ""
+
+        prompt = f"""你是短视频脚本编辑。下面脚本有若干问题需要修复。
+
+## 诊断
+{diagnosis_text}
+
+## 修复指令
+{instruction_text}
+
+## 约束
+- 保持 JSON 结构（字段、类型）完全不变{marker_rule}
+- 🔴 original_text 一个字都不许改
+- 保持仿写风格和话题方向不变
+
+## 当前脚本
+```json
+{script_text}
+```
+
+输出纯 JSON，无 markdown 包裹。"""
+
+        type_label = "口播" if is_oral else "混剪"
+        for attempt in range(2):
+            try:
+                raw = self._call_api(prompt)
+                fixed = self._parse_json(raw, retry_prompt=prompt)
+                logger.info("正文微调完成 (%s, attempt %d)", type_label, attempt + 1)
+                return fixed
+            except Exception as e:
+                logger.warning("正文微调失败 (attempt %d): %s", attempt + 1, e)
+                if attempt == 0:
+                    prompt = f"上次输出 JSON 解析失败：{e}\n请严格按格式输出。\n\n{prompt}"
+
+        logger.warning("正文微调耗尽，回退原版")
+        return script
+
+    def micro_adjust_markers(self, script: dict) -> dict:
+        """AI 微调口播情绪标记分布：random 选一半 + AI 批量语义转换。"""
+        import random as _random
+
+        dialogs = script.get("dialogs", [])
+        if not dialogs:
+            return script
+
+        markers_info = []
+        for i, d in enumerate(dialogs):
+            if isinstance(d, list) and len(d) >= 2:
+                text = str(d[1]).strip() if d[1] else ""
+                m = re.search(r'【([^】]+)】\s*$', text)
+                if m:
+                    markers_info.append((i, m.group(1), len(m.group(1))))
+
+        if len(markers_info) < 2:
+            return script
+
+        total = len(markers_info)
+        len_2 = [info for info in markers_info if info[2] == 2]
+        len_4 = [info for info in markers_info if info[2] == 4]
+
+        if len_2 and len_4:
+            return script
+
+        target_len = 4 if len(len_2) == total else 2
+        convert_count = max(1, total // 2)
+        to_convert = _random.sample(markers_info, convert_count)
+        marker_list = [info[1] for info in to_convert]
+
+        logger.info("标记微调: %d个全%d字 → 随机选%d个转%d字",
+                    total, markers_info[0][2], convert_count, target_len)
+
+        prompt = f"""将以下情绪标记转换为约{target_len}字版本，保留原始情感含义。
+
+标记列表: {json.dumps(marker_list, ensure_ascii=False)}
+
+返回: {{"converted": {{"原标记": "新标记", ...}}}}，纯 JSON，无其他文字。"""
+
+        mapping = {}
+        ai_succeeded = False
+        for attempt in range(2):
+            try:
+                raw = self._call_api(prompt, script_type="oral")
+                mapping = self._parse_json(raw).get("converted", {})
+                if mapping:
+                    ai_succeeded = True
+                    break
+                logger.warning("标记微调 AI 返回空映射 (attempt %d/2)", attempt + 1)
+            except Exception as e:
+                logger.warning("标记微调 AI 失败 (attempt %d/2): %s", attempt + 1, e)
+                if attempt == 0:
+                    prompt = f"上次输出 JSON 解析失败：{e}\n请严格按格式输出。\n\n{prompt}"
+
+        # 算法兜底：AI 调用全部失败时，用字符串拼接替代
+        if not ai_succeeded:
+            logger.info("标记微调 AI 耗尽，使用字符串拼接算法兜底")
+            mapping = {}
+            for old_marker in marker_list:
+                if target_len == 4:
+                    mapping[old_marker] = old_marker + old_marker
+                else:
+                    mapping[old_marker] = old_marker[:2]
+
+        replaced = 0
+        for idx, old_marker, _ in to_convert:
+            new_marker = mapping.get(old_marker)
+            if new_marker and new_marker != old_marker:
+                dialogs[idx][1] = dialogs[idx][1].replace(
+                    f"【{old_marker}】", f"【{new_marker}】")
+                replaced += 1
+
+        logger.info("标记微调完成: 转换 %d/%d 个%s",
+                    replaced, len(to_convert),
+                    "（算法兜底）" if not ai_succeeded else "")
+        return script
+
+    def _check_ai_flavor(self, script: dict, script_type: str) -> dict:
+        """检测生成脚本中的 AI 写作痕迹。"""
+        texts = []
+        if script_type == "oral":
+            for d in script.get("dialogs", []):
+                if isinstance(d, list) and len(d) >= 2:
+                    texts.append(str(d[1]))
+        else:
+            for r in script.get("rows", []):
+                if isinstance(r, list) and len(r) >= 1:
+                    texts.append(str(r[0]))
+        combined = " ".join(texts)
+
+        detected = []
+
+        ai_words = [
+            "此外", "值得注意的是", "深入探讨", "至关重要的",
+            "展现了", "标志着", "见证了", "堪称", "充分",
+        ]
+        for w in ai_words:
+            if w in combined:
+                detected.append(f"AI词汇「{w}」")
+
+        if re.search(r'不仅.{0,10}更是', combined):
+            detected.append("否定式排比「不仅是...更是...」")
+        if re.search(r'不只是.{0,10}而是', combined):
+            detected.append("否定式排比「不只是...而是...」")
+
+        promo = ["令人惊叹", "无与伦比", "必看的", "叹为观止", "绝美的"]
+        for w in promo:
+            if w in combined:
+                detected.append(f"宣传腔「{w}」")
+
+        if detected:
+            return {"pass": False, "detected": detected}
+        return {"pass": True, "detected": []}
+
     def _compute_similarity(self, script: dict, script_type: str,
                             audio_transcript: str = "") -> float:
-        """计算生成脚本与参考视频内容之间的字符三元组 Jaccard 相似度。
-
-        返回值范围 0-1。返回 0 表示无法计算（参考文本为空）。
-        阈值：超过 0.4（40%）视为相似度过高，需要降重。
-        """
-        # 参考文本使用音频转录文本
+        """计算生成脚本与参考视频内容之间的字符三元组 Jaccard 相似度。"""
         ref_text = (audio_transcript or "")
         if not ref_text.strip():
             return 0.0
 
-        # 提取「创作内容」文本，口播不比较 original_text（它是原文还原，天然高度相似）
         script_parts = []
         if script_type == "oral":
             for d in script.get("dialogs", []):
@@ -252,9 +526,7 @@ class ScriptGenerator:
         if not script_text.strip():
             return 0.0
 
-        # 字符三元组提取（适合中文，无需分词）
         def char_ngrams(text: str, n: int = 3) -> set:
-            # 只保留中文字符和字母数字
             cleaned = re.sub(r'[^一-鿿\w]', '', text)
             if len(cleaned) < n:
                 return {cleaned}
@@ -271,7 +543,7 @@ class ScriptGenerator:
         return len(intersection) / len(union) if union else 0.0
 
     def _validate(self, script: dict, script_type: str = "mix"):
-        """验证脚本结构，校验阈值对齐 requirements.json。长度由 max_tokens 控制，不在此校验。"""
+        """验证脚本结构，校验阈值对齐 requirements.json。"""
         req = load_requirements()
 
         if "title" not in script:
@@ -281,13 +553,11 @@ class ScriptGenerator:
         if "hashtags" not in script or not isinstance(script.get("hashtags"), list):
             raise ScriptGeneratorError("缺少 hashtags 数组")
 
-        # 清理 + 校验话题词数量（交付要求 4-5 个）
         hashtags = [t for t in script["hashtags"] if isinstance(t, str) and t.strip()]
         if len(hashtags) < 4:
             raise ScriptGeneratorError(
                 f"话题词不足: {len(hashtags)} 个（至少需要 4 个）。"
                 f"请确保生成的话题词为中文短语，如：职场干货、面试技巧、求职")
-        # 话题词中不允许出现品牌名
         brand = req.get("混剪", {}).get("广告", {}).get("品牌", "鱼泡直聘")
         for t in hashtags:
             if brand in t:
@@ -302,26 +572,16 @@ class ScriptGenerator:
             if "dialogs" not in script or not isinstance(script["dialogs"], list):
                 raise ScriptGeneratorError("缺少 dialogs 数组")
 
-            dia_range = req.get("口播", {}).get("对话轮数范围", [8, 20])
-            dia_lo, dia_hi = dia_range[0], dia_range[1]
-            actual_count = len(script["dialogs"])
-            if actual_count < dia_lo or actual_count > dia_hi:
-                raise ScriptGeneratorError(
-                    f"对话轮数不符: 需要 {dia_lo}-{dia_hi} 轮，实际 {actual_count} 轮")
-
             for i, d in enumerate(script["dialogs"]):
                 if not isinstance(d, list) or len(d) < 2:
                     raise ScriptGeneratorError(f"第{i}轮对话格式错误（需要[角色,对话]）")
                 role, text = d[0], d[1]
-                # 角色名只能是纯字母 A 或 B
                 if str(role).strip() not in ("A", "B"):
                     raise ScriptGeneratorError(
                         f"第{i}轮角色名错误: '{role}'（只能是 'A' 或 'B'）")
-                # 对话内容末尾必须有【标记】
                 text_str = str(text).strip() if text else ""
                 if not text_str:
                     raise ScriptGeneratorError(f"第{i}轮对话内容为空")
-                # 检查末尾【标记】
                 marker_match = re.search(r'【[^】]+】\s*$', text_str)
                 if not marker_match:
                     raise ScriptGeneratorError(

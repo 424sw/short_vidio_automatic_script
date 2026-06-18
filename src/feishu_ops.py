@@ -264,6 +264,15 @@ class FeishuClient:
             json=body,
         )
 
+    def create_block_children(self, doc_id: str, parent_block_id: str,
+                              children: list[dict]) -> dict:
+        """为指定 block 创建子 block（如为表格单元格追加段落）。"""
+        return self._request(
+            "POST",
+            f"{FEISHU_BASE_URL}/docx/v1/documents/{doc_id}/blocks/{parent_block_id}/children",
+            json={"children": children},
+        )
+
     def insert_table_row(self, doc_id: str, table_block_id: str, row_index: int) -> dict:
         """向表格插入一行."""
         return self._request(
@@ -418,16 +427,37 @@ class FeishuClient:
         # 跳过表头行 (row 0), 从 row 1 开始填数据
         for i, row in enumerate(rows_data):
             content_text = str(row[0]) if row else ""
+            # 按 \n 拆分为段落，每段写为独立的子 text block（飞书中独立 block = 换段/段间距）
+            paragraphs = [p for p in content_text.split("\n") if p.strip()]
+            logger.info("DEBUG 行%d: %d段, raw=\n%s", i+1, len(paragraphs), content_text.replace("\n", "⏎\n"))
             row = i + 1  # 数据行从第1行开始（第0行是表头）
             col0_idx = row * C + 0
             col1_idx = row * C + 1
 
-            if col0_idx < len(cells):
+            if col0_idx < len(cells) and paragraphs:
                 cell0 = cells[col0_idx]
-                child0 = cell0.get("children", [""])[0] if cell0 else None
-                if child0:
-                    self.update_text_block(doc_id, child0, content_text,
-                                          multiline=True)
+                existing_child_ids = cell0.get("children", []) if cell0 else []
+                existing_count = len(existing_child_ids)
+
+                for pi, para in enumerate(paragraphs):
+                    if pi < existing_count:
+                        # 复用已有的子 text block
+                        self.update_text_block(doc_id, existing_child_ids[pi],
+                                              para, multiline=False)
+                    else:
+                        # 创建新的子 text block（段落）
+                        self.create_block_children(doc_id, cell0["block_id"], [{
+                            "block_type": 2,
+                            "text": {
+                                "elements": [{
+                                    "text_run": {
+                                        "content": para,
+                                        "text_element_style": {},
+                                    }
+                                }]
+                            }
+                        }])
+                        time.sleep(0.12)
 
             # 素材列：暂不开发图片插入，不执行写入操作
             pass

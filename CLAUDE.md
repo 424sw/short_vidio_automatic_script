@@ -23,7 +23,7 @@ streamlit run app.py           # http://localhost:8501
 ├── src/
 │   ├── douyin_extractor.py        ←  ① 提取：URL 解析 → 下载视频
 │   ├── video_analyzer.py          ←  ② 分析：音频提取 + Whisper 转录
-│   ├── prompt_builder.py          ←  Prompt 模板：综合/混剪/口播/审核
+│   ├── prompt_builder.py          ←  Prompt 模板：混剪/口播/审核
 │   ├── script_generator.py        ←  ③ 生成 + ④ 审核
 │   └── feishu_ops.py              ←  ⑤ 飞书：模板复制 → 填充 → 公开
 ├── config/
@@ -32,7 +32,6 @@ streamlit run app.py           # http://localhost:8501
 ├── tools/
 │   ├── setup_models.py            ←  faster-whisper 模型下载
 │   └── models/faster-whisper-small/  ←  本地 Whisper 模型
-├── _archive/                      ←  旧版代码备份
 ├── requirements.txt
 └── packages.txt                   ←  apt-get: ffmpeg
 ```
@@ -43,8 +42,8 @@ streamlit run app.py           # http://localhost:8501
 
 | 类型 | 形式 | 输出 |
 |------|------|------|
-| **混剪** (`mix`) | 单人图文讲解 | 10-16 行文案 + 配图素材 |
-| **口播** (`oral`) | A/B 双人角色对话 | 8-20 轮对话 + 原片还原文案 |
+| **混剪** (`mix`) | 单人图文讲解 | 文案 + 配图素材 |
+| **口播** (`oral`) | A/B 双人角色对话 | 对话 + 原片还原文案 |
 
 用户手动选择（`selectbox`: `["mix", "oral"]`）。
 
@@ -73,17 +72,18 @@ streamlit run app.py           # http://localhost:8501
 
 ### 步骤 3：生成脚本
 
-固定目标字数 500 字约束篇幅 → 繁体转简体 → 注入 Prompt 模板（直接基于音频转录仿写）→ 一次 AI 调用生成 JSON → `_parse_json()` 解析（失败自动重试一次）。**不在此处校验**（质量问题留步骤 4 集中修）。
-
-批量生成：串行生成，间隔 1.5s，不同 `variation_seed` 保证差异化。
+按脚本类型约束篇幅（混剪 300-400 字 / 口播 400-500 字）→ 繁体转简体 → 注入 Prompt 模板（直接基于音频转录仿写）→ 一次 AI 调用生成 JSON → `_parse_json()` 解析（失败自动重试一次）。**不在此处校验**（质量问题留步骤 4 集中修）。
 
 ### 步骤 4：审核微调
 
-诊断**长度偏差** + **相似度**（字符三元组 Jaccard，>40% 触发降重指令）→ 回传 AI 修正（`temperature=0.2`）→ `_validate()` 硬性检查（title/hashtags ≥4 不含品牌名、行数/轮数范围、角色名 A/B、末尾【标记】）。失败回退原版 + `_fix_markers()` 程序补标记。
+诊断六维度 — **格式**、**长度**（上下限硬性约束）、**相似度**（字符三元组 Jaccard，>40% 触发降重）、**段数**（混剪，每行 ≤3 段）、**AI 味**（检测高频 AI 词汇/否定排比/宣传腔）、**标记分布**（口播，2 字和 4 字标记混合）→ 分两阶段处理：
+
+- **阶段 1（回退循环）**：格式/长度不合格 → 回退重生成（最多 1 次）
+- **阶段 2（AI 微调）**：一次 `micro_adjust()` 修复格式/长度/相似度/AI 味/段数 → 若口播标记分布单一，追加 `micro_adjust_markers()` → 微调后重审
+
+程序兜底：`_validate()` 硬性检查（title/hashtags ≥4 不含品牌名、行数/轮数范围、角色名 A/B、末尾【标记】）。失败回退原版 + `_fix_markers()` 程序补标记。
 
 **约束**：`original_text` 不准改，【标记】只调标记之前的正文。
-
-**注意**：批量生成时只审核 `scripts[0]` 主脚本。
 
 ### 步骤 5：飞书文档
 
@@ -91,16 +91,21 @@ streamlit run app.py           # http://localhost:8501
 
 **飞书限制**：不支持 Image Block（`block_type=27`），素材列只写文字描述。
 
-## 两次 AI 调用
+## AI 调用
 
-| # | 步骤 | 调用 | 输入 | 输出 |
-|---|------|------|------|------|
-| 1 | 步骤 3 | `generate()` | 音频转录 + Prompt | 脚本 JSON |
-| 2 | 步骤 4 | `review()` | 脚本 + 诊断 | 修正后脚本 |
+最少 1 次（审核直接通过），最多 3 次（回退 + 微调 + 标记微调）：
+
+| # | 步骤 | 调用 | 输入 | 输出 | 何时触发 |
+|---|------|------|------|------|----------|
+| 1 | 步骤 3 | `generate()` | 音频转录 + Prompt | 脚本 JSON | 始终 |
+| 2 | 步骤 4 | `micro_adjust()` | 脚本 + 诊断报告 | 修正后脚本 | 审核不通过时 |
+| 3 | 步骤 4 | `micro_adjust_markers()` | 脚本 | 标记分布修正 | 口播且标记单一长度时 |
+
+`review()` 是纯 Python 程序化检查，不调用 AI。
 
 ## 配置系统
 
-**`config/__init__.py`**：API 密钥（环境变量 → `st.secrets` → 内置加密值）、边界常量（`MAX_SCRIPT_COUNT=5`、`DOC_TTL_SECONDS=300` 等）、`load_requirements()`
+**`config/__init__.py`**：API 密钥（环境变量 → `st.secrets` → 内置加密值）、边界常量（`DOC_TTL_SECONDS=300`、`FIXED_TARGET_CHARS_MIX/ORAL`、超时常量等）、`load_requirements()`
 
 **`config/requirements.json`**：脚本规则（行数范围、对话轮数、情绪选项、广告品牌、产品介绍库等），修改后重启生效
 
@@ -130,16 +135,12 @@ Streamlit 只热重载 `app.py`，`src/` 模块不会自动刷新。代码已用
 
 **解决办法**：
 1. 删 `__pycache__`：`find . -name "__pycache__" -type d -exec rm -rf {} +`
-2. 杀进程：`netstat -ano | grep 8501` → `taskkill //F //PID <PID>`
-3. 等端口释放后重启
+2. 杀进程：`netstat -ano | grep 8501` 找到 PID → `taskkill //F //PID <PID>`
+3. 等端口释放后重启：`streamlit run app.py --server.port 8501`
+4. 不需要检查是否重启成功！
 
 ## 后续规划
 
-1. ✅ **完全去除「AI 分析」** — 已删除 `video_analyzer.synthesize()`，步骤 3 直接基于音频转录仿写，AI 调用从 3 次减为 2 次
-2. ✅ **固定字数 ≈ 500 字** — 已替换动态字数计算，`FIXED_TARGET_CHARS = 500`
-3. ✅ **寻找「仿写 skill」** — 已在 Prompt 中强化仿写核心原则（信息守恒、措辞完全替换）
-4. ✅ **补全 timeout + retry** — 短链接 HEAD、FFmpeg 下载、飞书认证、飞书 401 处理均已加重试；超时常量集中到 `config/__init__.py`
-5. ✅ **只保留 FFmpeg 下载** — 已删除 requests 流式下载回退方案
-6. **飞书图片插入** — API 不支持 `block_type=27`，需另辟蹊径
-7. **管理界面/SubAgent** — 在原有用户界面基础上增加管理后台
-8. **其他优化** — 输出面板多脚本合并到一个文件夹、输入面板支持个性要求（在精细模式中实现）、手机端 UI 优化
+1. **飞书图片插入** — API 不支持 `block_type=27`，需另辟蹊径
+2. **管理界面/SubAgent** — 在原有用户界面基础上增加管理后台
+3. **其他优化** — 输出面板多脚本合并到一个文件夹、输入面板支持个性要求（在精细模式中实现）、手机端 UI 优化

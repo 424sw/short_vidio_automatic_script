@@ -2,6 +2,7 @@
 短视频脚本生成系统
 输入抖音链接 → AI 分析 + 类型检测 → 生成脚本 → AI 审核 → 飞书文档（5 步）
 """
+import json
 import time
 import uuid
 import shutil
@@ -29,7 +30,7 @@ from src.douyin_extractor import DouyinExtractor, DouyinError  # noqa: E402
 from src.video_analyzer import VideoAnalyzer, VideoAnalysisError  # noqa: E402
 from src.script_generator import ScriptGenerator, ScriptGeneratorError  # noqa: E402
 from src.feishu_ops import FeishuClient, FeishuError  # noqa: E402
-from config import MAX_SCRIPT_COUNT, DOC_TTL_SECONDS  # noqa: E402
+from config import DOC_TTL_SECONDS  # noqa: E402
 
 
 st.set_page_config(
@@ -89,7 +90,6 @@ DEFAULTS = {
     "script_type_selection": "mix",
     "script_type": "mix",
     "quality": "standard",
-    "script_count": 1,
     "target_chars": 0,
     "cancel_requested": False,
     "pipeline_started": False,  # 首次进入进度面板时显示「准备中」
@@ -213,8 +213,8 @@ def render_input_panel():
         key="input_url",
         label_visibility="visible",
     )
-    # 类型 / 质量 / 数量 同行
-    col_type, col_quality, col_count = st.columns([1.5, 1, 0.7])
+    # 类型 / 质量 同行
+    col_type, col_quality = st.columns([1, 1])
     with col_type:
         script_type_selection = st.selectbox(
             "脚本类型",
@@ -233,13 +233,6 @@ def render_input_panel():
             key="input_quality",
         )
         st.session_state.quality = quality
-    with col_count:
-        script_count = st.number_input(
-            "输出数目",
-            min_value=1, max_value=MAX_SCRIPT_COUNT, value=1, step=1,
-            key="input_count",
-        )
-        st.session_state.script_count = script_count
     clicked = st.button(
         "开始生成脚本", type="primary", use_container_width=True,
         disabled=not bool(video_url.strip()),
@@ -247,12 +240,10 @@ def render_input_panel():
     if clicked:
         _type = st.session_state.script_type_selection
         _quality = st.session_state.quality
-        _count = min(st.session_state.script_count, MAX_SCRIPT_COUNT)
         clear_run()
         st.session_state.video_url = video_url.strip()
         st.session_state.script_type_selection = _type
         st.session_state.quality = _quality
-        st.session_state.script_count = _count
         st.session_state.step = 1
         st.rerun()
 
@@ -563,46 +554,47 @@ def step2_analyze():
 
 
 def step3_generate():
-    from config import FIXED_TARGET_CHARS
+    from config import FIXED_TARGET_CHARS_MIX, FIXED_TARGET_CHARS_ORAL
 
     video_title = st.session_state.video_title
-    script_count = st.session_state.get("script_count", 1)
-    st.session_state.status_msg = f"正在生成{'脚本' if script_count == 1 else f'{script_count} 个脚本'}..."
+    script_type = st.session_state.script_type
+    st.session_state.status_msg = "正在生成脚本..."
 
     try:
         gen = ScriptGenerator()
         audio_transcript = st.session_state.get("audio_transcript", "")
-        # Whisper 默认输出繁体，转为简体中文
+        # Whisper 默认输出繁体 + 英文标点，转为简体中文 + 中文标点
         if audio_transcript:
             try:
                 from zhconv import convert
                 audio_transcript = convert(audio_transcript, "zh-cn")
             except ImportError:
                 pass
+            # 标点符号规范化：Whisper 默认输出英文标点，替换为中文标点
+            # 只改标点编码，不改任何文字内容
+            _punct_map = {',': '，', '.': '。', '!': '！', '?': '？', ':': '：', ';': '；'}
+            for _en, _zh in _punct_map.items():
+                audio_transcript = audio_transcript.replace(_en, _zh)
 
-        # 固定目标字数为 500 字，约束 AI 生成篇幅
-        target_chars = FIXED_TARGET_CHARS
+        # 按脚本类型使用不同的目标字数（下限, 上限）
+        target_lo, target_chars = FIXED_TARGET_CHARS_ORAL if script_type == "oral" else FIXED_TARGET_CHARS_MIX
         st.session_state.target_chars = target_chars
-        logger.info("使用固定目标字数: %d", target_chars)
+        logger.info("目标字数: %d~%d", target_lo, target_chars)
 
         _touch_heartbeat()
         _check_cancel()
 
-        if script_count == 1:
-            scripts = [gen.generate(script_type=st.session_state.script_type,
-                                    video_title=video_title, audio_transcript=audio_transcript,
-                                    target_chars=target_chars)]
-        else:
-            scripts = gen.generate_multiple(st.session_state.script_type,
-                                            script_count, video_title=video_title,
-                                            audio_transcript=audio_transcript,
-                                            target_chars=target_chars)
+        script = gen.generate(script_type=script_type,
+                              video_title=video_title, audio_transcript=audio_transcript,
+                              target_lo=target_lo, target_chars=target_chars)
 
-        st.session_state.script_jsons = scripts
-        st.session_state.script_json = scripts[0]
-        st.session_state.step = 4
-        st.session_state.status_msg = f"{'脚本已生成' if script_count == 1 else f'{len(scripts)} 个脚本已生成'}"
-        logger.info("脚本生成成功 (%d 个)", len(scripts))
+        st.session_state.script_jsons = [script]
+        st.session_state.script_json = script
+        st.session_state.target_lo = target_lo
+        st.session_state.rollback_count = 0
+        st.session_state.step = 4  # 进入审核
+        st.session_state.status_msg = "脚本已生成，正在审核..."
+        logger.info("脚本生成成功")
     except StepCancelledError:
         raise
     except ScriptGeneratorError as e:
@@ -618,97 +610,135 @@ def step3_generate():
 
 
 def step4_review():
-    """AI 二次仿写审核：聚焦长度偏差和相似度，缩写/扩写/降重改写。"""
+    """全维度程序化合规检查 + 回退/微调分流。
+
+    串行逻辑：
+    阶段 1：回退循环（格式/长度）— 最多 1 次
+    阶段 2：AI 微调 — 合并修复格式/长度/相似度/AI 味，再独立处理标记分布
+    """
     script = st.session_state.script_json
     script_type = st.session_state.script_type
-    total = len(st.session_state.get("script_jsons", [script]))
-    st.session_state.status_msg = "AI 正在审核主脚本..." if total > 1 else "AI 正在审核脚本..."
+    audio_transcript = st.session_state.get("audio_transcript", "")
+    target_lo = st.session_state.get("target_lo", 0)
+    target_chars = st.session_state.get("target_chars", 0)
+    video_title = st.session_state.get("video_title", "")
+    MAX_ROLLBACK = 1
+
+    st.session_state.status_msg = "正在审核脚本..."
 
     try:
-        _touch_heartbeat()
-        _check_cancel()
         gen = ScriptGenerator()
 
-        refined, note = gen.review(
-            script, script_type,
-            audio_transcript=st.session_state.get("audio_transcript", ""),
-            target_chars=st.session_state.get("target_chars", 0))
-        st.session_state.script_json = refined
-        # 更新 script_jsons 中的主脚本
-        scripts = st.session_state.get("script_jsons", [])
-        if scripts:
-            scripts[0] = refined
-            st.session_state.script_jsons = scripts
+        # ===== 阶段 1：回退循环（格式 + 长度） =====
+        for attempt in range(MAX_ROLLBACK + 1):
+            _touch_heartbeat()
+            _check_cancel()
+
+            report = gen.review(
+                script, script_type,
+                audio_transcript=audio_transcript,
+                target_lo=target_lo, target_chars=target_chars)
+            st.session_state.review_report = report
+
+            if not report["needs_rollback"]:
+                logger.info("阶段1 审核通过（回退 %d 次后达标）", attempt)
+                break
+
+            if attempt < MAX_ROLLBACK:
+                rollback_count = st.session_state.rollback_count + 1
+                st.session_state.rollback_count = rollback_count
+                logger.info("回退重生成 %d/%d: format=%s length=%s",
+                            rollback_count, MAX_ROLLBACK,
+                            report["format"]["pass"], report["length"]["pass"])
+                st.session_state.status_msg = f"审核不达标，回退重生成（{rollback_count}/{MAX_ROLLBACK}）..."
+                script = gen.generate(
+                    script_type=script_type,
+                    video_title=video_title,
+                    audio_transcript=audio_transcript,
+                    target_lo=target_lo, target_chars=target_chars)
+            else:
+                logger.warning("回退耗尽（%d 次），交由微调修复", MAX_ROLLBACK)
+                break
+
+        # ===== 阶段 2：AI 微调（串行：正文 → 标记） =====
+        needs_any_fix = report["needs_rollback"] or report["needs_micro"]
+        if needs_any_fix:
+            st.session_state.status_msg = "正在 AI 微调..."
+
+            # 正文微调：格式 + 长度 + 相似度 + AI 味（一次 AI 调用）
+            script = gen.micro_adjust(
+                script, script_type, report,
+                audio_transcript=audio_transcript,
+                target_lo=target_lo, target_chars=target_chars)
+
+            # 标记微调：口播且标记分布单一（一次小型 AI 调用）
+            if script_type == "oral" and not report["marker_distribution"]["pass"]:
+                script = gen.micro_adjust_markers(script)
+
+            # 微调后重审
+            report = gen.review(
+                script, script_type,
+                audio_transcript=audio_transcript,
+                target_lo=target_lo, target_chars=target_chars)
+            st.session_state.review_report = report
+            st.session_state.status_msg = "微调完成"
+            logger.info("微调后重审: rollback=%s micro=%s",
+                        report["needs_rollback"], report["needs_micro"])
+        else:
+            st.session_state.status_msg = "审核通过 ✓"
+            logger.info("审核全部通过")
+
+        st.session_state.script_json = script
+        _update_main_script(script)
         st.session_state.step = 5
-        st.session_state.status_msg = f"审核完成：{note}"
-        logger.info("审核微调: %s", note)
+
     except StepCancelledError:
         raise
     except Exception as e:
-        logger.warning("审核微调异常: %s", e)
+        import traceback
+        logger.warning("审核异常: %s\n%s", e, traceback.format_exc())
         st.session_state.step = 5
         st.session_state.status_msg = "审核跳过（异常），使用原始脚本"
 
 
+def _update_main_script(script: dict):
+    """更新 script_jsons 中的主脚本（索引 0）。"""
+    scripts = st.session_state.get("script_jsons", [])
+    if scripts:
+        scripts[0] = script
+        st.session_state.script_jsons = scripts
+
+
 def step5_feishu():
-    scripts = st.session_state.get("script_jsons", [st.session_state.script_json])
-    if not scripts:
-        scripts = [st.session_state.script_json]
-    total = len(scripts)
-    st.session_state.status_msg = f"正在创建飞书文档（1/{total}）..." if total > 1 else "正在创建飞书文档..."
+    script = st.session_state.script_json
+    st.session_state.status_msg = "正在创建飞书文档..."
     try:
         _touch_heartbeat()
         client = _get_feishu_client()
-        doc_urls = []
-        created_ids = []
-        failed_count = 0
 
-        for i, script in enumerate(scripts):
-            _check_cancel()
-            if total > 1:
-                st.session_state.status_msg = f"正在创建飞书文档（{i+1}/{total}）..."
-            try:
-                result = client.create_and_fill(
-                    st.session_state.script_type, script,
-                    st.session_state.video_url, st.session_state.video_title,
-                    seq=i + 1,
-                )
-                doc_urls.append(result["url"])
-                created_ids.append(result["doc_id"])
-            except Exception as doc_err:
-                failed_count += 1
-                logger.warning("文档 %d/%d 创建失败: %s", i + 1, total, doc_err)
-                continue
+        result = client.create_and_fill(
+            st.session_state.script_type, script,
+            st.session_state.video_url, st.session_state.video_title,
+            seq=1,
+        )
 
-        st.session_state.doc_urls = doc_urls
-        st.session_state.doc_url = doc_urls[0] if doc_urls else ""
-        st.session_state.created_doc_ids = created_ids
+        st.session_state.doc_url = result["url"]
+        st.session_state.doc_urls = [result["url"]]
+        st.session_state.created_doc_ids = [result["doc_id"]]
         st.session_state.doc_created_at = time.time()
         st.session_state.step = 6
         st.session_state.status_msg = ""
 
         # 写入过期队列文件（main 入口每次检查，不依赖线程）
-        _enqueue_expiry(created_ids)
+        _enqueue_expiry([result["doc_id"]])
 
         # 清理本地临时文件（session 目录）
         _cleanup_session()
 
-        # 汇总信息
-        if failed_count:
-            status = f"完成：{len(doc_urls)}/{total} 个文档创建成功"
-            if failed_count == total:
-                st.session_state.error = "所有飞书文档创建均失败，请稍后重试。"
-                st.session_state.step = 0
-                return
-            st.session_state.status_msg = f"{status}，{failed_count} 个失败"
-        logger.info("飞书文档创建完成: %d/%d", len(doc_urls), total)
+        logger.info("飞书文档创建完成")
     except StepCancelledError:
-        # 即使取消，已创建的文档也返回（让用户有时间转存）
-        st.session_state.created_doc_ids = created_ids
-        st.session_state.doc_created_at = time.time()
-        _enqueue_expiry(list(created_ids))
         st.session_state.step = 6
-        st.session_state.status_msg = "部分文档已创建（生成被取消）"
+        st.session_state.status_msg = "文档创建被取消"
     except FeishuError as e:
         st.session_state.error = str(e)
         st.session_state.step = 0
