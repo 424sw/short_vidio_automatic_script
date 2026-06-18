@@ -23,7 +23,7 @@ streamlit run app.py           # http://localhost:8501
 ├── src/
 │   ├── douyin_extractor.py        ←  ① 提取：URL 解析 → 下载视频
 │   ├── video_analyzer.py          ←  ② 分析：音频提取 + Whisper 转录
-│   ├── prompt_builder.py          ←  Prompt 模板：混剪/口播/审核
+│   ├── prompt_builder.py          ←  Prompt 模板：混剪/口播
 │   ├── script_generator.py        ←  ③ 生成 + ④ 审核
 │   └── feishu_ops.py              ←  ⑤ 飞书：模板复制 → 填充 → 公开
 ├── config/
@@ -107,7 +107,7 @@ streamlit run app.py           # http://localhost:8501
 
 **`config/__init__.py`**：API 密钥（环境变量 → `st.secrets` → 内置加密值）、边界常量（`DOC_TTL_SECONDS=300`、`FIXED_TARGET_CHARS_MIX/ORAL`、超时常量等）、`load_requirements()`
 
-**`config/requirements.json`**：脚本规则（行数范围、对话轮数、情绪选项、广告品牌、产品介绍库等），修改后重启生效
+**`config/requirements.json`**：脚本规则（行数范围、广告品牌、产品介绍库等），修改后重启生效
 
 ## 运行时
 
@@ -143,4 +143,4 @@ Streamlit 只热重载 `app.py`，`src/` 模块不会自动刷新。代码已用
 
 1. **飞书图片插入** — API 不支持 `block_type=27`，需另辟蹊径
 2. **管理界面/SubAgent** — 在原有用户界面基础上增加管理后台
-3. **其他优化** — 输出面板多脚本合并到一个文件夹、输入面板支持个性要求（在精细模式中实现）、手机端 UI 优化
+3. **其他优化** — 输出面板多脚本合并到一个文件夹、输入面板支持个性要求（在精细模式中实现）、选项框禁止手动输入、手机端 UI 优化

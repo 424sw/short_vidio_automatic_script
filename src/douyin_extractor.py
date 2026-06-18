@@ -250,7 +250,7 @@ class DouyinExtractor:
 
         output = Path(output_path)
         if output.is_dir():
-            output = output / "test_video.mp4"
+            output = output / "video.mp4"
         output.parent.mkdir(parents=True, exist_ok=True)
 
         # 检查磁盘剩余空间

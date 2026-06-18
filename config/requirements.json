@@ -4,8 +4,7 @@
   "模板配置": {
     "文件夹Token": "nodcnfKha8zoI7HaoGIBOg7D4Hh",
     "混剪模板ID": "B1HtdfhjKo4g4QxgNNncCtVwnth",
-    "口播模板ID": "EbLGdZ2qYoQgpixsmQjc5EkjnNf",
-    "产品介绍库链接": "https://bcn0ov0rhrrv.feishu.cn/wiki/DkwNwFK21iLUr4kB8wVcygGxn5e"
+    "口播模板ID": "EbLGdZ2qYoQgpixsmQjc5EkjnNf"
   },
 
   "通用": {
@@ -28,8 +27,7 @@
   },
 
   "口播": {
-    "对话轮数范围": "_已废弃，由字数约束替代",
-    "角色格式": ["角色名", "对话内容【情绪标记】", "情绪词"],
+"角色格式": ["角色名", "对话内容【情绪标记】", "情绪词"],
     "原片文案字数": "150-300字",
     "原片风格": "完整的原片叙述，纯文本，无角色对话",
     "图片素材格式": "每条以 emoji 开头 + 中文描述"

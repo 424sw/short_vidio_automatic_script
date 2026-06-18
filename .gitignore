@@ -2,10 +2,12 @@
 .streamlit/secrets.toml
 .streamlit/credentials.toml
 
-# Claude Code local config
+# Claude Code local config / runtime
 .mcp.json
 .claude/settings.local.json
 .claude/settings.json
+.claude/scheduled_tasks.json
+.claude/worktrees/
 
 # Python cache
 __pycache__/
@@ -27,6 +29,7 @@ data/*.json
 # Runtime marker files (never commit)
 data/.cleanup_done
 data/.expiry_queue
+data/.expiry_queue.tmp
 
 # OS files
 .DS_Store

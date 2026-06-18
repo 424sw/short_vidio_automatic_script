@@ -226,8 +226,7 @@ HTTP_TIMEOUT_LONG = 20           # 抖音页面请求
 SUBPROCESS_TIMEOUT_FFMPEG_DOWNLOAD = 180  # FFmpeg 视频下载
 SUBPROCESS_TIMEOUT_AUDIO_DURATION = 30    # FFmpeg 音频时长检测
 SUBPROCESS_TIMEOUT_AUDIO_EXTRACT = 60     # FFmpeg 音频提取
-AI_TIMEOUT_GENERATE = 120        # 脚本生成 API
-AI_TIMEOUT_REVIEW = 120          # 脚本审核 API
+AI_TIMEOUT_GENERATE = 120        # 脚本生成 / 审核 API
 
 # 脚本目标字数（上下限，约束 AI 生成篇幅）
 FIXED_TARGET_CHARS_MIX = (300, 400)   # 混剪：(下限, 上限)

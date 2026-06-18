@@ -1,5 +1,4 @@
-"""Prompt 构建：视频分析 + 混剪/口播脚本生成 + 审核微调。"""
-import json
+"""Prompt 构建：混剪/口播脚本生成的 Prompt 模板。"""
 from config import load_requirements
 
 
@@ -20,28 +19,6 @@ def _build_product_section() -> str:
     for i, p in enumerate(products):
         lines.append(f"{i+1}. 【{p.get('主题','')}】→ 适用：{p.get('适用场景','')} → 文案：{p.get('文案','')}")
     return "\n".join(lines)
-
-
-def get_quality_config(quality: str = "standard") -> dict:
-    """质量配置：standard / fine 两档。
-
-    standard → int8 + beam=5（更快）；fine → float32 + beam=10（更准）。
-    """
-    presets = {
-        "standard": {
-            "label": "标准",
-            "compute_type": "int8",
-            "beam_size": 5,
-            "est_asr_time": "约 60-120 秒",
-        },
-        "fine": {
-            "label": "精细",
-            "compute_type": "float32",
-            "beam_size": 10,
-            "est_asr_time": "约 90-180 秒",
-        },
-    }
-    return presets.get(quality, presets["standard"])
 
 
 def build_mix_prompt(audio_transcript: str = "",
@@ -226,86 +203,3 @@ def build_oral_prompt(audio_transcript: str = "",
 ## 图片素材：只需 2-3 条（文字描述即可），官方/品牌风格
 
 ## 话题词要求：4-5 个中文短语，严禁出现品牌名"""
-
-
-def build_review_prompt(script_json: dict, audio_transcript: str = "",
-                        target_chars: int = 0, similarity: float = 0.0,
-                        script_chars: int = 0) -> str:
-    """审核微调 Prompt：**只关注两项** —— ①内容长度匹配 ②内容相似度匹配。
-
-    格式问题（标记/角色名/话题词/对话轮数等）由 _validate() + _fix_markers() 兜底，
-    不在此处理。
-    """
-    script_text = json.dumps(script_json, ensure_ascii=False, indent=2)
-
-    # ---- 诊断：仅长度 + 相似度 ----
-    diagnoses = []
-    instructions = []
-
-    if target_chars > 0 and script_chars > 0:
-        ratio = script_chars / target_chars
-        lo_chars = int(target_chars * 1.1)
-        hi_chars = int(target_chars * 1.2)
-        if ratio > 1.2:
-            diagnoses.append(f"过长：{script_chars}字 vs 参考{target_chars}字（+{int((ratio-1)*100)}%）")
-            instructions.append(
-                f"**缩写+仿写**：删减到 **{lo_chars}~{hi_chars} 字**。\\n"
-                f"🔴 只删冗余、合并同类即可，**严禁低于 {lo_chars} 字**，过度压缩会被拒绝。")
-        elif ratio < 1.1:
-            diagnoses.append(f"过短：{script_chars}字 vs 参考{target_chars}字（{int(ratio*100)}%）")
-            instructions.append(
-                f"**扩写+仿写**：扩充到 **{lo_chars}~{hi_chars} 字**。\\n"
-                f"🔴 适度补充细节即可，**严禁超过 {hi_chars} 字**。")
-
-    if similarity > 0.4:
-        diagnoses.append(f"相似度过高：{similarity*100:.0f}%（上限40%）")
-        instructions.append(
-            "**降重仿写（硬性）**：以下 3 条必须全部做到——\n"
-            "① 换句式：把陈述句改成反问/感叹/假设句（\"你知道吗？\"\"要是...呢？\"\"想想看！\"）\n"
-            "② 换案例：把原文的具体数据、故事、举例全部换成你自己创造的同类素材\n"
-            "③ 换措辞：同一个意思用完全不同的词来表达（如\"找工作\"→\"谋职\"→\"上岸\"→\"拿offer\"轮换）\n"
-            "④ **信息守恒**：替换案例和措辞时，确保原视频的关键信息点不丢失、不扭曲\n"
-            "目标：改完后相似度 < 40%，不能只是换几个同义词敷衍。")
-
-    diagnosis_text = "\n".join(f"- {d}" for d in diagnoses) if diagnoses else "✅ 长度与相似度均在合理范围"
-    instruction_text = "\n".join(f"{i+1}. {instr}" for i, instr in enumerate(instructions))
-
-    # 达标 → 原样返回
-    if not instructions:
-        return f"""以下脚本已通过审核（长度和相似度均达标）。**直接原样输出，不做任何修改。**
-
-```json
-{script_text}
-```
-纯 JSON，无 markdown 包裹。"""
-
-    # 有诊断 → 二次仿写
-    is_oral = "dialogs" in script_json
-    marker_rule = ""
-    if is_oral:
-        marker_rule = "- 🔴 **每轮对话末尾的【标记】一个都不许改**，只调整标记之前的对话正文内容\n"
-
-    return f"""你是短视频脚本策划，之前输出的脚本在长度或相似度上不达标，需要做一次**二次仿写**。
-
-## 原始音频转录
-{audio_transcript[:1500] if audio_transcript else "（无）"}
-
-## 当前脚本
-```json
-{script_text}
-```
-
-## 🔴 诊断
-{diagnosis_text}
-
-## 🔴 修改指令
-{instruction_text}
-
-## 要求
-- 保持 JSON 结构（字段、类型）完全不变
-- 🔴 **original_text 一个字都不许改**，它是原视频文案的忠实还原，不是创作内容
-- 只调整 **dialogs（对话）** 的篇幅和措辞，降低与参考视频的相似度{marker_rule}
-- 对 dialogs 的修改仅限于：删减冗余句子、合并同类表达、更换措辞——严禁改动【标记】
-
-## 输出
-纯 JSON，无 markdown 包裹。"""
