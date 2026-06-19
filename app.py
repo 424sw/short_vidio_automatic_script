@@ -66,6 +66,13 @@ def _get_feishu_client():
     return FeishuClient()
 
 
+@st.cache_resource
+def _get_image_matcher():
+    from src.image_matcher import ImageMatcher
+    client = _get_feishu_client()
+    return ImageMatcher(feishu_client=client)
+
+
 # ============================================================
 # Session State
 # ============================================================
@@ -397,16 +404,17 @@ def _expire_documents(doc_ids: list = None):
 # ============================================================
 
 STEP_LABELS = {
-    1: ("① 提取视频", "正在下载抖音视频并提取标题/作者..."),
-    2: ("② 语音转文字", "正在提取音频并语音转文字..."),
-    3: ("③ 生成脚本", "正在根据分析结果生成脚本..."),
-    4: ("④ 审核微调", "AI 正在逐项审核并修正脚本..."),
-    5: ("⑤ 飞书文档", "正在创建飞书文档并填充脚本内容..."),
+    1: ("1 提取视频", "正在下载抖音视频并提取标题/作者..."),
+    2: ("2 语音转文字", "正在提取音频并语音转文字..."),
+    3: ("3 生成脚本", "正在根据分析结果生成脚本..."),
+    4: ("4 审核微调", "AI 正在逐项审核并修正脚本..."),
+    5: ("5 飞书文档", "正在创建飞书文档并填充文字..."),
+    6: ("6 AI插图", "AI 正在匹配表情包并插入文档..."),
 }
 
 # 不同质量等级的时间估算（精细模式使用更好的语音转文字模型，耗时更长）
-_EST_STD  = {1: "约 5-10 秒", 2: "约 60-120 秒", 3: "约 10-25 秒", 4: "约 30-60 秒", 5: "约 5-12 秒"}
-_EST_FINE = {1: "约 5-10 秒", 2: "约 90-180 秒", 3: "约 15-30 秒", 4: "约 30-60 秒", 5: "约 5-15 秒"}
+_EST_STD  = {1: "约 5-10 秒", 2: "约 60-120 秒", 3: "约 10-25 秒", 4: "约 30-60 秒", 5: "约 5-12 秒", 6: "约 6-13 秒"}
+_EST_FINE = {1: "约 5-10 秒", 2: "约 90-180 秒", 3: "约 15-30 秒", 4: "约 30-60 秒", 5: "约 5-15 秒", 6: "约 6-13 秒"}
 
 def _get_step_estimates():
     q = st.session_state.get("quality", "standard")
@@ -418,7 +426,7 @@ def render_progress_panel():
     estimate = _get_step_estimates().get(step, "")
 
     # 进度条
-    st.progress((step - 1) / 5, text=f"步骤 {step}/5")
+    st.progress((step - 1) / 6, text=f"步骤 {step}/6")
 
     # 步骤标题
     st.markdown(f"<h3 style='text-align:center; margin:0.75rem 0 0.25rem 0;'>{label}</h3>", unsafe_allow_html=True)
@@ -461,6 +469,8 @@ def render_progress_panel():
             step4_review()
         elif step == 5:
             step5_feishu()
+        elif step == 6:
+            step6_images()
     except StepCancelledError:
         _cleanup_session()
         st.session_state.step = 0
@@ -738,7 +748,7 @@ def step5_feishu():
         st.session_state.doc_urls = [result["url"]]
         st.session_state.created_doc_ids = [result["doc_id"]]
         st.session_state.doc_created_at = time.time()
-        st.session_state.step = 6
+        st.session_state.step = 6  # 进入 AI 插图步骤
         st.session_state.status_msg = ""
 
         # 写入过期队列文件（main 入口每次检查，不依赖线程）
@@ -749,7 +759,7 @@ def step5_feishu():
 
         logger.info("飞书文档创建完成")
     except StepCancelledError:
-        st.session_state.step = 6
+        st.session_state.step = 7  # 跳过插图，直接到结果页
         st.session_state.status_msg = "文档创建被取消"
     except FeishuError as e:
         st.session_state.error = str(e)
@@ -761,6 +771,47 @@ def step5_feishu():
         st.session_state.step = 0
         _cleanup_session()
         logger.exception(f"飞书操作异常: {e}")
+
+
+def step6_images():
+    """在已生成的飞书文档中匹配并插入表情包图片。"""
+    st.session_state.status_msg = "正在扫描表情包库并匹配..."
+
+    try:
+        _touch_heartbeat()
+        _check_cancel()
+
+        client = _get_feishu_client()
+        matcher = _get_image_matcher()
+
+        script = st.session_state.script_json
+        script_type = st.session_state.script_type
+        doc_id = st.session_state.created_doc_ids[0] if st.session_state.created_doc_ids else None
+
+        if not doc_id:
+            logger.warning("无 doc_id，跳过图片插入")
+            st.session_state.step = 7
+            return
+
+        result = client.insert_all_images(doc_id, script, script_type, matcher)
+
+        total, success, failed = result["total"], result["success"], result["failed"]
+        if total > 0:
+            st.session_state.status_msg = f"已插入 {success}/{total} 张图片" + (
+                f"，{failed} 张失败" if failed else "")
+        else:
+            st.session_state.status_msg = "无图片素材，已跳过"
+
+        st.session_state.step = 7
+        logger.info("AI 插图完成: %d/%d 成功", success, total)
+
+    except StepCancelledError:
+        st.session_state.step = 7
+        st.session_state.status_msg = "图片插入被取消"
+    except Exception as e:
+        logger.warning("AI 插图异常，跳过: %s", e)
+        st.session_state.step = 7
+        st.session_state.status_msg = f"图片插入异常（已跳过）: {e}"
 
 
 # ============================================================
@@ -806,9 +857,9 @@ def main():
 
     if step == 0:
         render_input_panel()
-    elif step in (1, 2, 3, 4, 5):
+    elif step in (1, 2, 3, 4, 5, 6):
         render_progress_panel()
-    elif step == 6:
+    elif step == 7:
         render_result_panel()
 
 

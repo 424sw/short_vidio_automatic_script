@@ -872,6 +872,208 @@ class FeishuClient:
             logger.warning("两阶段均未找到交付字段")
 
     # ============================================================
+    # 图片插入（Step 6）
+    # ============================================================
+
+    def _clear_cell_text_children(self, doc_id: str, cell_id: str):
+        """清空 Cell 内已有文本子块，避免图片上方出现空白行。"""
+        try:
+            children_data = self._request(
+                "GET",
+                f"{FEISHU_BASE_URL}/docx/v1/documents/{doc_id}/blocks/{cell_id}/children",
+                params={"page_size": 50},
+            )
+            for child in children_data.get("data", {}).get("items", []):
+                if child.get("block_type") == 2:  # text block
+                    self.update_text_block(doc_id, child["block_id"], "")
+        except Exception as e:
+            logger.debug("清空 Cell 文本子块异常（非关键）: %s", e)
+
+    def _insert_single_image(self, doc_id: str, cell_id: str,
+                             image_bytes: bytes) -> bool:
+        """单张图片完整链路（三步串行）：创建占位 → 上传 → 绑定。
+
+        供 insert_all_images() 并行调度，失败返回 False。
+        """
+        import io as _io
+        try:
+            # ① 在 Cell 下创建 Image Block 占位
+            create_resp = self._request(
+                "POST",
+                f"{FEISHU_BASE_URL}/docx/v1/documents/{doc_id}/blocks/{cell_id}/children",
+                json={
+                    "index": 0,  # 插到最前面，避免在原文本子块下方产生空白行
+                    "children": [{"block_type": 27, "image": {}}],
+                },
+            )
+
+            children = create_resp.get("data", {}).get("children", [])
+            if not children:
+                logger.warning("创建 Image Block 失败：响应无 children")
+                return False
+            image_block_id = children[0].get("block_id")
+            if not image_block_id:
+                logger.warning("创建 Image Block 失败：无 block_id")
+                return False
+
+            # ② 上传图片（必须用独立 requests 调用，session 级 Content-Type 会覆盖 multipart）
+            self._ensure_token()
+            auth_header = {"Authorization": self._session.headers.get("Authorization", "")}
+
+            upload_resp = requests.post(
+                f"{FEISHU_BASE_URL}/drive/v1/medias/upload_all",
+                headers=auth_header,  # 只传 Auth，让 requests 自动设 multipart Content-Type
+                files={"file": ("emoji.png", _io.BytesIO(image_bytes), "image/png")},
+                data={
+                    "file_name": "emoji.png",
+                    "parent_type": "docx_image",
+                    "parent_node": image_block_id,
+                    "size": str(len(image_bytes)),
+                },
+                timeout=HTTP_TIMEOUT_MEDIUM,
+            )
+
+            if upload_resp.status_code == 401:
+                self._token_expires_at = 0
+                self._ensure_token()
+                auth_header = {"Authorization": self._session.headers.get("Authorization", "")}
+                upload_resp = requests.post(
+                    f"{FEISHU_BASE_URL}/drive/v1/medias/upload_all",
+                    headers=auth_header,
+                    files={"file": ("emoji.png", _io.BytesIO(image_bytes), "image/png")},
+                    data={
+                        "file_name": "emoji.png",
+                        "parent_type": "docx_image",
+                        "parent_node": image_block_id,
+                        "size": str(len(image_bytes)),
+                    },
+                    timeout=HTTP_TIMEOUT_MEDIUM,
+                )
+
+            ur = upload_resp.json()
+            if ur.get("code") != 0:
+                logger.warning("上传图片失败: code=%s msg=%s", ur.get("code"), ur.get("msg"))
+                return False
+            file_token = ur["data"]["file_token"]
+
+            # ③ 绑定图片到占位 block
+            self._request(
+                "PATCH",
+                f"{FEISHU_BASE_URL}/docx/v1/documents/{doc_id}/blocks/{image_block_id}",
+                json={"replace_image": {"token": file_token}},
+            )
+
+            return True
+
+        except Exception as e:
+            logger.warning("图片插入异常: %s", e)
+            return False
+
+    def insert_all_images(self, doc_id: str, script: dict, script_type: str,
+                          matcher) -> dict:
+        """Step 6 并行编排：匹配 → 下载 → 插入全部图片。
+
+        Returns:
+            {"total": int, "success": int, "failed": int}
+        """
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+        from config import IMAGE_INSERT_WORKERS
+
+        # 1. 提取所有素材描述
+        if script_type == "mix":
+            rows = script.get("rows", [])
+            descriptions = [str(r[1]) if len(r) >= 2 else "" for r in rows]
+        else:
+            descriptions = script.get("images", [])
+
+        if not descriptions:
+            logger.info("无素材描述，跳过图片插入")
+            return {"total": 0, "success": 0, "failed": 0}
+
+        total = len(descriptions)
+        logger.info("Step 6: 共 %d 条素材描述待匹配", total)
+
+        # 2. 匹配 + 并行下载
+        matches = matcher.match_all(descriptions)
+        hit_count = sum(1 for m in matches if m)
+        logger.info("匹配结果: %d/%d 命中关键词, 其余降级兜底", hit_count, total)
+
+        downloads = matcher.download_all(matches)
+        ready = [(i, d) for i, d in enumerate(downloads) if d and d.get("image_bytes")]
+        logger.info("下载完成: %d/%d 张图片就绪", len(ready), total)
+
+        # 3. 找到每个描述对应的目标 Cell
+        blocks = self.get_blocks(doc_id)
+        block_map = {b["block_id"]: b for b in blocks}
+        page = next((b for b in blocks if b["block_type"] == 1), None)
+        if not page:
+            logger.warning("找不到 page block，无法插入图片")
+            return {"total": total, "success": 0, "failed": total}
+
+        page_children = [block_map[cid] for cid in page.get("children", []) if cid in block_map]
+        table_block = next((b for b in page_children if b["block_type"] == 31), None)
+        if not table_block:
+            logger.warning("找不到表格 block，无法插入图片")
+            return {"total": total, "success": 0, "failed": total}
+
+        cell_ids = table_block.get("children", [])
+        cells = [block_map.get(cid) for cid in cell_ids if cid in block_map]
+
+        # 构建 (desc_idx, cell_block_id, image_bytes) 任务列表
+        tasks = []
+        if script_type == "mix":
+            C = 2
+            for desc_idx, dl in ready:
+                row = desc_idx + 1  # desc_idx = 原始行号（0-based），+1 跳过表头
+                col_idx = row * C + 1  # 素材列
+                if col_idx < len(cells) and cells[col_idx]:
+                    tasks.append((desc_idx, cells[col_idx]["block_id"], dl["image_bytes"]))
+        else:
+            # 口播：所有图片插入到 Col 2（唯一数据行的第 3 列）
+            # 口播表格: cells[0]=header0, [1]=header1, [2]=header2, [3]=data0, [4]=data1, [5]=data2
+            if len(cells) >= 6 and cells[5]:
+                cell_id = cells[5]["block_id"]
+                for desc_idx, dl in ready:
+                    tasks.append((desc_idx, cell_id, dl["image_bytes"]))
+
+        if not tasks:
+            logger.warning("无有效 Cell 可供插入图片")
+            return {"total": total, "success": 0, "failed": total}
+
+        # 3.5 清除目标 Cell 中的已有空文本子块（消除图片上方的空白行）
+        unique_cells = set(cell_id for _, cell_id, _ in tasks)
+        for cell_id in unique_cells:
+            self._clear_cell_text_children(doc_id, cell_id)
+
+        # 4. 并行插入
+        success = 0
+        failed = 0
+
+        with ThreadPoolExecutor(max_workers=IMAGE_INSERT_WORKERS) as executor:
+            futures = {
+                executor.submit(
+                    self._insert_single_image, doc_id, cell_id, img_bytes
+                ): desc_idx
+                for desc_idx, cell_id, img_bytes in tasks
+            }
+            for future in as_completed(futures):
+                desc_idx = futures[future]
+                try:
+                    if future.result():
+                        success += 1
+                    else:
+                        failed += 1
+                        logger.warning("图片 %d 插入失败", desc_idx + 1)
+                except Exception as e:
+                    failed += 1
+                    logger.warning("图片 %d 插入异常: %s", desc_idx + 1, e)
+
+        # 未匹配或下载失败的也算入 failed
+        failed += total - len(ready)
+        logger.info("Step 6 完成: total=%d success=%d failed=%d", total, success, failed)
+        return {"total": total, "success": success, "failed": failed}
+
+    # ============================================================
     # 完整流程
     # ============================================================
 

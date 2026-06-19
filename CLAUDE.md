@@ -140,8 +140,40 @@ netstat -ano | grep 8501 | awk '{print $NF}' | sort -u | while read pid; do task
 streamlit run app.py --server.port 8501
 ```
 
+## 飞书图片插入（已验证可行，待集成）
+
+**素材来源：** 飞书表情包库 `S8HRdTVmToAPArxMeWRci0iBn4T`（437 张，分类：万能类 / 抽象类 / 情绪类 / 动态类 mp4）。
+
+**已通过的验证**（[tools/test_image_in_cell.py](tools/test_image_in_cell.py)，2025-06-19）——TableCell 内嵌 Image Block 三步全部成功：
+
+```
+① POST /docx/v1/documents/{doc}/blocks/{cell_id}/children
+     children: [{block_type: 27, image: {}}]
+     → 返回创建的 image_block_id
+
+② POST /drive/v1/medias/upload_all  (multipart)
+     file_name, parent_type="docx_image",
+     parent_node=<image_block_id>, size=<bytes>, file=<binary>
+     → 返回 file_token
+
+③ PATCH /docx/v1/documents/{doc}/blocks/{image_block_id}
+     {replace_image: {token: file_token}}
+     → 图片渲染到单元格内
+```
+
+**踩坑：** 步骤②必须传 `size`（字节数），否则返回 1061002 参数错误。
+
+**待集成位置：**
+- 混剪：[src/feishu_ops.py:463](src/feishu_ops.py#L463) — `_fill_mix_table()` Col 1 素材列（当前 `pass`）
+- 口播：[src/feishu_ops.py:571](src/feishu_ops.py#L571) — `_fill_oral_table()` Col 2 图片素材列（当前 `pass`）
+
+**前置工程化工作：**
+1. 扫描表情包库 → 下载分类索引（`data/assets/emoji_index.json`）
+2. 本地缓存图片（`data/assets/emoji/`），避免每次调 API 下载
+3. AI 产出的素材描述 → 关键词匹配 → 选图
+4. 选择策略：优先匹配 → 随机同分类 → 兜底万能类
+
 ## 后续规划
 
-1. **飞书图片插入** — API 不支持 `block_type=27`，需另辟蹊径
-2. **管理界面/SubAgent** — 在原有用户界面基础上增加管理后台
-3. **其他优化** — 输出面板多脚本合并到一个文件夹、输入面板支持个性要求（在精细模式中实现）、选项框禁止手动输入、手机端 UI 优化
+1. **管理界面/SubAgent** — 在原有用户界面基础上增加管理后台
+2. **其他优化** — 图片插入要求补足、输出面板多脚本合并到一个文件夹、输入面板支持个性要求（在精细模式中实现）、选项框禁止手动输入、手机端 UI 优化
