@@ -703,30 +703,9 @@ def step4_review():
                 audio_transcript=audio_transcript,
                 target_lo=target_lo, target_chars=target_chars)
             st.session_state.review_report = report
+            st.session_state.status_msg = "微调完成"
             logger.info("微调后重审: rollback=%s micro=%s",
                         report["needs_rollback"], report["needs_micro"])
-
-            # 微调后若仍需要回退（如长度超限/段数失衡），最后一次重生成兜底
-            if report["needs_rollback"] and st.session_state.rollback_count < MAX_ROLLBACK:
-                rollback_count = st.session_state.rollback_count + 1
-                st.session_state.rollback_count = rollback_count
-                logger.warning("微调未修复回退项，强制重生成 %d/%d", rollback_count, MAX_ROLLBACK)
-                st.session_state.status_msg = f"微调未达标，正在重生成（{rollback_count}/{MAX_ROLLBACK}）..."
-                script = gen.generate(
-                    script_type=script_type,
-                    video_title=video_title,
-                    audio_transcript=audio_transcript,
-                    target_lo=target_lo, target_chars=target_chars)
-                if script_type == "mix":
-                    script = gen._normalize_mix_punctuation(script)
-                report = gen.review(
-                    script, script_type,
-                    audio_transcript=audio_transcript,
-                    target_lo=target_lo, target_chars=target_chars)
-                st.session_state.review_report = report
-                logger.info("强制重生成后重审: rollback=%s micro=%s",
-                            report["needs_rollback"], report["needs_micro"])
-            st.session_state.status_msg = "微调完成"
         else:
             st.session_state.status_msg = "审核通过 ✓"
             logger.info("审核全部通过")
