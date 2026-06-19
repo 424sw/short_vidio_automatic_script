@@ -7,10 +7,9 @@
 import re
 import logging
 import requests
-from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from config import (
-    FEISHU_BASE_URL, EMOJI_LIBRARY_DOC_ID, IMAGE_INSERT_WORKERS,
+    FEISHU_BASE_URL, EMOJI_LIBRARY_DOC_ID,
     HTTP_TIMEOUT_MEDIUM,
 )
 
@@ -289,30 +288,16 @@ class ImageMatcher:
         return r.content
 
     def download_all(self, matches: list[dict]) -> list[dict]:
-        """并行下载一批匹配结果中的图片。"""
-        tokens = [(i, m["token"]) for i, m in enumerate(matches) if m]
-        results = [None] * len(matches)
-
-        if not tokens:
-            return [{"image_bytes": None} if m is None else {**m, "image_bytes": None}
-                    for m in matches]
-
-        with ThreadPoolExecutor(max_workers=IMAGE_INSERT_WORKERS) as executor:
-            futures = {
-                executor.submit(self.download_one, token): idx
-                for idx, token in tokens
-            }
-            for future in as_completed(futures):
-                idx = futures[future]
-                try:
-                    img_bytes = future.result()
-                    results[idx] = {**matches[idx], "image_bytes": img_bytes}
-                except Exception as e:
-                    logger.warning("并行下载异常 idx=%d: %s", idx, e)
-                    results[idx] = {**matches[idx], "image_bytes": None}
-
-        for i, m in enumerate(matches):
-            if results[i] is None:
-                results[i] = {"image_bytes": None} if m is None else {**m, "image_bytes": None}
-
+        """串行下载一批匹配结果中的图片（避免并行竞态 + 飞书限流）。"""
+        results = []
+        for m in matches:
+            if not m:
+                results.append({"image_bytes": None})
+                continue
+            try:
+                img_bytes = self.download_one(m["token"])
+                results.append({**m, "image_bytes": img_bytes})
+            except Exception as e:
+                logger.warning("下载图片异常: %s", e)
+                results.append({**m, "image_bytes": None})
         return results

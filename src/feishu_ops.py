@@ -976,8 +976,6 @@ class FeishuClient:
         Returns:
             {"total": int, "success": int, "failed": int}
         """
-        from concurrent.futures import ThreadPoolExecutor, as_completed
-        from config import IMAGE_INSERT_WORKERS
 
         # 1. 提取所有素材描述
         if script_type == "mix":
@@ -1045,28 +1043,20 @@ class FeishuClient:
         for cell_id in unique_cells:
             self._clear_cell_text_children(doc_id, cell_id)
 
-        # 4. 并行插入
+        # 4. 串行插入（避免飞书 429 限流）
         success = 0
         failed = 0
 
-        with ThreadPoolExecutor(max_workers=IMAGE_INSERT_WORKERS) as executor:
-            futures = {
-                executor.submit(
-                    self._insert_single_image, doc_id, cell_id, img_bytes
-                ): desc_idx
-                for desc_idx, cell_id, img_bytes in tasks
-            }
-            for future in as_completed(futures):
-                desc_idx = futures[future]
-                try:
-                    if future.result():
-                        success += 1
-                    else:
-                        failed += 1
-                        logger.warning("图片 %d 插入失败", desc_idx + 1)
-                except Exception as e:
+        for desc_idx, cell_id, img_bytes in tasks:
+            try:
+                if self._insert_single_image(doc_id, cell_id, img_bytes):
+                    success += 1
+                else:
                     failed += 1
-                    logger.warning("图片 %d 插入异常: %s", desc_idx + 1, e)
+                    logger.warning("图片 %d 插入失败", desc_idx + 1)
+            except Exception as e:
+                failed += 1
+                logger.warning("图片 %d 插入异常: %s", desc_idx + 1, e)
 
         # 未匹配或下载失败的也算入 failed
         failed += total - len(ready)
